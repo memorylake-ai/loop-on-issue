@@ -129,3 +129,50 @@ class LatestSession(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VisibleAttribution(unittest.TestCase):
+    """A human reading the board must be able to tell who wrote what.
+
+    The agent authenticates as the same account as the person it reports to, so
+    authorship shows theirs. The machine marker is an HTML comment and renders as
+    nothing — correct for the machine, useless for the human, who saw five
+    identical-looking notes from themselves.
+    """
+
+    def test_an_agent_note_says_so_visibly(self):
+        self.assertIn(state.AGENT_PREFIX, state.stamp("posted the plan"))
+
+    def test_the_prefix_comes_before_the_body(self):
+        body = state.stamp("posted the plan")
+        self.assertLess(body.index(state.AGENT_PREFIX), body.index("posted the plan"))
+
+    def test_the_machine_marker_is_still_there(self):
+        # It is what "has a human replied" anchors on; the visible prefix is
+        # additive, not a replacement.
+        self.assertTrue(state.is_agent_note(state.stamp("x")))
+
+    def test_attributes_still_round_trip(self):
+        body = state.stamp("x", session="abc", runner="claude")
+        self.assertEqual(state.parse_marker(body), {"session": "abc", "runner": "claude"})
+
+    def test_a_relayed_human_answer_is_not_labelled_as_an_agent(self):
+        # It is a human's answer, carried. Labelling it [AGENT] would misattribute
+        # the decision to the machine that merely delivered it.
+        body = state.relay("go left", by="张三", via="dingtalk")
+        self.assertNotIn(state.AGENT_PREFIX, body)
+        self.assertFalse(state.is_agent_note(body))
+
+    def test_a_note_from_before_this_change_is_still_recognised(self):
+        self.assertTrue(state.is_agent_note("<!-- loop-on-issue:agent -->\nold, unprefixed"))
+
+    def test_a_human_writing_the_prefix_by_hand_is_not_an_agent_note(self):
+        # Otherwise anybody could silence their own reply by typing it.
+        self.assertFalse(state.is_agent_note("[AGENT] I am pretending"))
+
+    def test_unanswered_still_sees_a_human_reply_after_a_prefixed_note(self):
+        notes = [
+            Comment(id=1, author="bot", created_at="t1", body=state.stamp("asked")),
+            Comment(id=2, author="dev", created_at="t2", body="answered"),
+        ]
+        self.assertEqual([c.body for c in state.unanswered(notes)], ["answered"])

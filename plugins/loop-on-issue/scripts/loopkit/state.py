@@ -42,9 +42,16 @@ DORMANT = ("SKIP",)
 # is a note to another human, not a claim by an agent.
 _PREFIX_RE = re.compile(r"^\s*\[(" + "|".join(STATES) + r")\]\s*")
 
-#: Invisible in rendered markdown on both forges, so it labels a note as
-#: machine-written without adding visual noise to the thread.
+#: Invisible in rendered markdown on both forges, so machinery can label a note
+#: without relying on authorship — the agent authenticates as the same account as
+#: the human it reports to.
 MARKER_NAME = "loop-on-issue:agent"
+
+#: The same fact, said where a person can see it. The hidden marker is correct for
+#: the machine and useless for the human, who otherwise reads a thread of notes
+#: from themselves that they did not write. Detection never keys on this: a human
+#: typing it must not be able to make their own reply invisible to the loop.
+AGENT_PREFIX = "**[AGENT]**"
 
 #: Markers written by the private skills this plugin grew out of. Read but never
 #: written: a board mid-flight would otherwise lose the anchor that tells an agent
@@ -116,7 +123,7 @@ def stamp(body: str, session: str = None, runner: str = None) -> str:
         attrs += " session={}".format(session)
     if runner:
         attrs += " runner={}".format(runner)
-    return "<!-- {}{} -->\n{}".format(MARKER_NAME, attrs, body)
+    return "<!-- {}{} -->\n{} {}".format(MARKER_NAME, attrs, AGENT_PREFIX, body.lstrip())
 
 
 def is_agent_note(body: str) -> bool:
