@@ -176,3 +176,69 @@ class VisibleAttribution(unittest.TestCase):
             Comment(id=2, author="dev", created_at="t2", body="answered"),
         ]
         self.assertEqual([c.body for c in state.unanswered(notes)], ["answered"])
+
+
+class VisibleSession(unittest.TestCase):
+    """Whatever the marker records, the reader can see.
+
+    The session id was an attribute of an HTML comment: recorded, recomputable,
+    and invisible. Somebody looking at a claimed issue could not tell which
+    session owned it, nor resume into it themselves — which is most of the point
+    of recording it on the board instead of deriving it.
+    """
+
+    def test_a_recorded_session_is_rendered(self):
+        body = state.stamp("Claimed.", session="9be05ae7-0957", runner="claude")
+        self.assertIn("9be05ae7-0957", _rendered(body))
+
+    def test_the_runner_is_named_beside_it(self):
+        body = state.stamp("Claimed.", session="abc", runner="codex")
+        self.assertIn("codex", _rendered(body))
+
+    def test_it_shows_how_to_get_into_it(self):
+        # A человек reading the board should be able to act on it, not just see it.
+        self.assertIn("--resume", _rendered(state.stamp("x", session="abc", runner="claude")))
+
+    def test_codex_gets_its_own_resume_command(self):
+        rendered = _rendered(state.stamp("x", session="abc", runner="codex"))
+        self.assertIn("codex", rendered)
+        self.assertNotIn("claude --resume", rendered)
+
+    def test_a_note_with_no_session_gains_no_footer(self):
+        # Every progress comment would otherwise carry it, which is noise.
+        self.assertNotIn("--resume", _rendered(state.stamp("posted the plan")))
+
+    def test_a_runner_without_a_session_is_still_stated(self):
+        # codex has no id until it starts; saying which runner holds the issue is
+        # still worth the line.
+        rendered = _rendered(state.stamp("Claimed.", runner="codex"))
+        self.assertIn("codex", rendered)
+        self.assertNotIn("--resume", rendered)
+
+    def test_the_attributes_still_parse(self):
+        body = state.stamp("x", session="abc", runner="claude")
+        self.assertEqual(state.parse_marker(body), {"session": "abc", "runner": "claude"})
+
+    def test_the_body_is_still_first(self):
+        body = _rendered(state.stamp("Claimed.", session="abc", runner="claude"))
+        self.assertLess(body.index("Claimed."), body.index("abc"))
+
+
+def _rendered(body):
+    """What a forge shows a human: HTML comments removed."""
+    import re
+
+    return re.sub(r"<!--.*?-->\n?", "", body, flags=re.DOTALL).strip()
+
+
+class SeparatorDoesNotBecomeAHeading(unittest.TestCase):
+    def test_a_blank_line_precedes_the_rule(self):
+        # `text\n---` is a setext heading: a single newline silently renders the
+        # comment's last line as an H2. No error, just wrong on every board.
+        body = state.stamp("Claimed for the `claude` runner.", session="abc", runner="claude")
+        self.assertIn("runner.\n\n---", body)
+        self.assertNotIn("runner.\n---", body)
+
+    def test_it_holds_for_the_runner_only_form(self):
+        body = state.stamp("Claimed.", runner="codex")
+        self.assertNotIn("Claimed.\n---", body)

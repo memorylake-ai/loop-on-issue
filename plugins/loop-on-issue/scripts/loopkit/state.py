@@ -123,7 +123,38 @@ def stamp(body: str, session: str = None, runner: str = None) -> str:
         attrs += " session={}".format(session)
     if runner:
         attrs += " runner={}".format(runner)
-    return "<!-- {}{} -->\n{} {}".format(MARKER_NAME, attrs, AGENT_PREFIX, body.lstrip())
+    return "<!-- {}{} -->\n{} {}{}".format(
+        MARKER_NAME, attrs, AGENT_PREFIX, body.lstrip(), session_footer(session, runner))
+
+
+def session_footer(session: str = None, runner: str = None) -> str:
+    """Render session ownership where a person can read and act on it.
+
+    Emitted from `stamp` rather than written at each call site, so what the marker
+    records and what the reader sees cannot drift apart — the id was recorded
+    faithfully for weeks while being invisible on every board it was written to.
+
+    Only when there is something to say: a progress comment carrying this would be
+    noise on every note.
+    """
+    if not (session or runner):
+        return ""
+    # Two newlines before the rule, not one: `text\n---` is a setext heading in
+    # markdown, so a single one silently renders the comment's last line as an H2.
+    lines = ["", "", "---", ""]
+    if runner and not session:
+        # codex has no id until it starts; which runner holds the issue is still
+        # worth stating.
+        lines.append("runner `{}` — session id recorded once it starts".format(runner))
+        return "\n".join(lines)
+    lines.append("session `{}`{}".format(session, "  ·  runner `{}`".format(runner) if runner else ""))
+    if runner == "codex":
+        lines.append("")
+        lines.append("看它当时怎么想的：`codex exec resume {}`".format(session))
+    else:
+        lines.append("")
+        lines.append("看它当时怎么想的：`claude --resume {}`".format(session))
+    return "\n".join(lines)
 
 
 def is_agent_note(body: str) -> bool:
