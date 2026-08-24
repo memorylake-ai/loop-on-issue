@@ -638,7 +638,7 @@ class Brain:
                     "直接发一句话就是提新需求",
                 ),
             )
-        blocks.append("`/r <ID>` 看某一条 · 批准：`同意 <ID>` · 驳回：`拒绝 <ID> <理由>`")
+        blocks.append("`/r <R-ID>` 看某一条 · 批准：`同意 <R-ID>` · 驳回：`拒绝 <R-ID> <理由>`")
         return md(*blocks)
 
     def _cmd_r(self, rest, inbound):

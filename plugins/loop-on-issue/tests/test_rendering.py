@@ -193,3 +193,50 @@ class PlaceholdersAreDistinguishable(unittest.TestCase):
             if "/dev" in line or "/i " in line or "/a " in line or "/skip" in line:
                 self.assertNotIn("<id>", line, line)
                 self.assertNotIn("<issue>", line, line)
+
+
+class PlaceholdersAgreeEverywhere(unittest.TestCase):
+    """A renamed placeholder has to be renamed in every reply, not just the help.
+
+    `/p` kept offering `同意 <ID>` in its footer after the help had moved to
+    `<R-ID>`, which is exactly the drift that teaches people to distrust the docs.
+    """
+
+    def _all_replies(self):
+        import shutil
+        import tempfile
+
+        from loopkit import intake as intake_mod
+        from loopkit import pending, repos as repos_mod
+
+        directory = tempfile.mkdtemp(prefix="loop-ph-")
+        self.addCleanup(shutil.rmtree, directory, True)
+        registry = repos_mod.Registry()
+        registry.add("widget", "acme/widget", directory)
+        registry.set_default("widget")
+        store = intake_mod.Store(directory + "/intake")
+        brain = listener.Brain(
+            forge_for=lambda repo: FakeForge(), registry=registry,
+            index=pending.Index(directory + "/pending"), store=store,
+            conversations=["cid-1"], approver="approver", approver_nick="Julian")
+
+        def say(text, sender="approver"):
+            return brain.handle(listener.Inbound(
+                msg_id=text, text=text, sender_id=sender, sender_nick="穆轩",
+                conversation_id="cid-1"))
+
+        say("一条需求", sender="somebody")
+        rid = store.all()[0].id
+        return [say(m) for m in ("/h", "/p", "/r " + rid, "/i 1", "/repos",
+                                 "/cancel", "/dev", "同意", "拒绝", "/repo",
+                                 "/a", "/skip", "/requeue")]
+
+    def test_no_reply_uses_the_retired_placeholder(self):
+        for reply in self._all_replies():
+            self.assertNotIn("<ID>", reply, reply[:120])
+            self.assertNotIn("<id>", reply, reply[:120])
+
+    def test_requirement_placeholders_are_uniform(self):
+        for reply in self._all_replies():
+            if "R-ID" in reply or "R编号" in reply:
+                self.assertNotIn("R编号", reply, reply[:120])
