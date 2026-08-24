@@ -366,3 +366,58 @@ class Setup(CLITest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NewIssuesCarryNoState(CLITest):
+    """A created issue must not arrive already labelled with a state.
+
+    The state machine lives in the title prefix, and `claim` refuses an issue that
+    already has one — it reads as somebody else's work in progress. So an issue
+    created with a prefix can never be claimed by anything, ever. Observed for
+    real: a decomposition agent, having read the swarm's state machine, stamped
+    [FINISHED] onto an issue it had just filed.
+    """
+
+    def _ready(self):
+        self.cli.route("api", "/labels", stdout=[{"name": "loop"}])
+        self.cli.route("api", "/assignees", stdout=[{"login": "muxuan"}])
+
+    def test_a_state_prefix_in_the_title_is_refused(self):
+        self._ready()
+        code, _, stderr = self.run_cli("create", "--title", "[FINISHED] a thing",
+                                       "--body", "b", "--assignee", "muxuan")
+        self.assertEqual(code, 2)
+        self.assertIn("FINISHED", stderr)
+        self.assertIsNone(self.cli.call_containing("POST", "/issues"))
+
+    def test_every_state_is_refused(self):
+        self._ready()
+        for state in ("CLAIMED", "WORKING", "PAUSED", "FINISHED", "SKIP"):
+            code, _, _ = self.run_cli("create", "--title", "[{}] x".format(state),
+                                      "--body", "b", "--assignee", "muxuan")
+            self.assertEqual(code, 2, state)
+
+    def test_a_stacked_prefix_is_refused_too(self):
+        self._ready()
+        code, _, _ = self.run_cli("create", "--title", "[CLAIMED][WORKING] x",
+                                  "--body", "b", "--assignee", "muxuan")
+        self.assertEqual(code, 2)
+
+    def test_an_unrelated_bracketed_prefix_is_fine(self):
+        # [RFC] or [POC] is somebody's own convention, not our state machine.
+        self._ready()
+        _, stdout, _ = self.run_cli("create", "--title", "[RFC] a thing", "--body", "b",
+                                    "--assignee", "muxuan", "--dry-run")
+        self.assertEqual(json.loads(stdout)["title"], "[RFC] a thing")
+
+    def test_a_plain_title_is_fine(self):
+        self._ready()
+        _, stdout, _ = self.run_cli("create", "--title", "a thing", "--body", "b",
+                                    "--assignee", "muxuan", "--dry-run")
+        self.assertEqual(json.loads(stdout)["title"], "a thing")
+
+    def test_the_refusal_explains_why(self):
+        self._ready()
+        _, _, stderr = self.run_cli("create", "--title", "[WORKING] x", "--body", "b",
+                                    "--assignee", "muxuan")
+        self.assertIn("claim", stderr.lower())

@@ -23,6 +23,12 @@ import time
 import sys
 import urllib.request
 
+#: How long a chat-raised job waits on a question before giving up on it.
+#: Generous on purpose: the person who raised the requirement is in the
+#: conversation the card lands in, and a job that guesses instead of waiting three
+#: minutes produces issues nobody agreed to.
+CHAT_ASK_WAIT = 300
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 
@@ -32,6 +38,7 @@ from loopkit import intake as intake_mod  # noqa: E402
 from loopkit import listener as listener_mod  # noqa: E402
 from loopkit import pending, remotes  # noqa: E402
 from loopkit import repos as repos_mod  # noqa: E402
+from loopkit import state as state_mod  # noqa: E402
 from loopkit import runner as runner_mod  # noqa: E402
 from loopkit.forge import for_repo  # noqa: E402
 from loopkit.models import Repo  # noqa: E402
@@ -210,37 +217,61 @@ class Executor:
 
         prompt = (self._retry_prompt(request) if resuming else self._prompt(request, entry))
         log_path = self.store.log_for(request.id)
+        repo_conf = cfg.load(entry.path)
+
+        env = dict(os.environ, LOOP_INTAKE=request.id)
+        env.pop("LOOP_ISSUE", None)
+        if request.kind == intake_mod.DEVELOP and request.issue:
+            # LOOP_INTAKE alone reaches the request; a development job also has an
+            # issue, and questions about the code belong on it.
+            env["LOOP_ISSUE"] = str(request.issue)
+        # Read by the hook *and* by an explicit `loop ask`. Without it the agent is
+        # told to confirm its reading with a human, gets an instant "nobody
+        # answered", and proceeds on its own guess — the question was asked and
+        # never waited for.
+        env["LOOP_ASK_WAIT"] = str(repo_conf.ask_wait or CHAT_ASK_WAIT)
+
+        command = (runner_mod.resume_command("claude", session, prompt, model=repo_conf.agent_model)
+                   if resuming
+                   else runner_mod.start_command("claude", session, prompt, model=repo_conf.agent_model))
+
         with open(log_path, "ab") as fh:
             fh.write("\n$ {}\n".format(request.kind).encode("utf-8"))
             try:
-                model = cfg.load(entry.path).agent_model
-                command = (runner_mod.resume_command("claude", session, prompt, model=model)
-                           if resuming
-                           else runner_mod.start_command("claude", session, prompt, model=model))
-                # LOOP_INTAKE is what lets the AskUserQuestion hook reach a
-                # human from a job that has no issue yet. Without it the hook
-                # steps aside and the tool runs in a headless session where
-                # nobody can answer it.
-                env = dict(os.environ, LOOP_INTAKE=request.id)
-                env.pop("LOOP_ISSUE", None)
-                if request.kind == intake_mod.DEVELOP and request.issue:
-                    env["LOOP_ISSUE"] = str(request.issue)
-                proc = subprocess.run(
-                    command,
-                    cwd=entry.path, stdout=fh, stderr=subprocess.STDOUT,
-                    timeout=self.timeout, env=env,
+                # Popen rather than run, so the pid is recorded before the wait: a
+                # job nobody can name the process of is a job nobody can stop.
+                proc = subprocess.Popen(
+                    command, cwd=entry.path, stdout=fh, stderr=subprocess.STDOUT,
+                    env=env, start_new_session=True,
                 )
-                code = proc.returncode
-            except subprocess.TimeoutExpired:
-                request.fail("timed out after {}s".format(self.timeout))
-                self.store.save(request)
-                self.notify(self._failure_text(request))
-                return
             except OSError as exc:
                 request.fail(str(exc))
                 self.store.save(request)
+                self._release_issue(request, entry)
                 self.notify(self._failure_text(request))
                 return
+            request.pid = proc.pid
+            self.store.save(request)
+            self._processes[request.id] = proc
+            try:
+                code = proc.wait(timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                _kill(proc.pid)
+                request.fail("timed out after {}s and was stopped".format(self.timeout))
+                self.store.save(request)
+                self._release_issue(request, entry)
+                self.notify(self._failure_text(request))
+                return
+            finally:
+                self._processes.pop(request.id, None)
+
+        # Cancelled while it ran: the record already says so, and overwriting it
+        # with a result would erase the fact that a human stopped it.
+        current = self.store.get(request.id)
+        if current and current.status == intake_mod.CANCELLED:
+            return
+        request = current or request
+
 
         result = _read_text(self.store.result_for(request.id))
         # Ask the board what exists, rather than believing the report. An agent
@@ -253,12 +284,41 @@ class Executor:
                 "no report. Inspect with `claude --resume {}`, or read {}".format(
                     code, request.session, log_path))
             self.store.save(request)
+            self._release_issue(request, entry)
             self.notify(self._failure_text(request))
             return
 
         request.finish(issues=issues)
         self.store.save(request)
         self.notify(self._success_text(request, result))
+
+    def _release_issue(self, request, entry):
+        """Hand a failed development job's issue back to a human.
+
+        The session that claimed it is gone, so the issue is left mid-flight with
+        nothing to finish it and nothing that will notice. PAUSED rather than
+        unclaimed, because a job that failed is a fact somebody should read before
+        the next run picks the issue up and repeats it.
+        """
+        if request.kind != intake_mod.DEVELOP or not request.issue:
+            return
+        try:
+            conf = cfg.load(entry.path)
+            forge = for_repo(remotes.detect(cwd=entry.path, forge=conf.forge, repo_path=entry.repo))
+            issue = forge.get_issue(request.issue)
+            current, base = state_mod.split_state(issue.title)
+            if current in (None, "PAUSED", "FINISHED", "SKIP"):
+                return
+            forge.add_issue_comment(request.issue, state_mod.stamp(
+                "The session working this stopped without submitting anything "
+                "(`{}`): {}\n\nLeft at PAUSED. Its log is `{}`, and "
+                "`claude --resume {}` opens what it saw.".format(
+                    request.id, request.error, self.store.log_for(request.id),
+                    request.session)))
+            forge.set_issue_title(request.issue, state_mod.compose("PAUSED", base))
+            log.info("released issue #%s back to PAUSED", request.issue)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not release issue #%s: %s", request.issue, exc)
 
     def _issues_filed(self, request, entry):
         """Issues carrying the queue label that appeared while this job ran.
@@ -298,15 +358,24 @@ class Executor:
     def _prompt(self, request, entry):
         if request.kind == intake_mod.DEVELOP:
             return (
-                "Use the loop-issue-swarm skill, but work **only** issue #{n} of {repo} "
-                "and nothing else — do not scan or claim anything from the queue.\n\n"
-                "Take it through the skill's normal cycle: triage, worktree, plan, code, "
-                "review, and submit the change request. Honour every safety boundary the "
-                "skill states, in particular: never merge and never close the issue.\n\n"
+                "**You are the development session for issue #{n} of {repo}.** Do the work "
+                "yourself, here, in this checkout. Do not spawn another agent, do not run "
+                "`claude -p`, and do not background anything and report back — there is nobody "
+                "watching for it, and the job ends when you do.\n\n"
+                "Read the `loop-issue-swarm` skill for *how a session works* — its "
+                "per-issue brief: plan, code, verify with the repository's own command, get "
+                "fresh eyes on the diff, submit. Ignore the parts about scanning a queue, "
+                "claiming issues and starting sessions; that has already happened and you "
+                "are the result of it.\n\n"
+                "Its safety boundaries all still hold, in particular: never merge, and "
+                "never close the issue.\n\n"
+                "If you hit something only a human can settle, use `AskUserQuestion` — it "
+                "is intercepted and relayed. If nobody answers, stop and say what you are "
+                "waiting on rather than guessing.\n\n"
                 "When you are done, write a short report to `{result}` — what you did, the "
                 "change request URL, and anything a human still has to decide. That file is "
                 "what gets sent back to the person who asked, so make it readable on its "
-                "own."
+                "own; an empty file means the job produced nothing."
             ).format(n=request.issue, repo=entry.repo, result=self.store.result_for(request.id))
 
         return (

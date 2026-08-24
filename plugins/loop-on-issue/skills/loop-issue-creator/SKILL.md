@@ -101,6 +101,51 @@ still `[PAUSED]`. The gate exists because filing queued issues *is* the trigger 
 unattended code changes, and being helpful past it defeats the only control there
 is.
 
+## Clarify first, and only then read code
+
+**Ask before you investigate, not after.** Recon against the wrong reading of a
+requirement is the most expensive thing this skill can do: minutes of grepping,
+reading and verifying, all of it spent establishing facts about something nobody
+asked for. Asking costs one round trip and the human is usually right there.
+
+This is not the same as pausing at every uncertainty. The test is narrow:
+
+> **Would two competent readings of this requirement send you into different parts
+> of the codebase, or produce slices with nothing in common?**
+
+If yes, ask now. If the readings differ only in detail you would settle during
+recon anyway, do not — that is a question you can answer yourself, and asking it
+spends somebody's attention on your homework.
+
+A real one, from this repository's own history. "初始化一个 deepseek harness plugin
+模版" admits at least three readings: a Cordis-style plugin for the DeepSeek
+Harness agent framework, an lm-evaluation-harness model adapter, or a standalone
+agent-loop harness. The session picked one, spent its whole cycle grounding it, and
+wrote in its own report: *"this is exactly what I would have put to `loop ask`."*
+Had it asked first, it would have known in ninety seconds which codebase to go
+read.
+
+```
+AskUserQuestion:
+  "「deepseek harness plugin」指哪一个？"
+  1. deepseek-harness（Cordis 框架）的插件 — 导出 apply(ctx, config)
+  2. lm-evaluation-harness 的模型适配器 — 评测用
+  3. 独立的 agent loop harness — 自带 CLI 和工具调用
+  4. 都不是，我再说清楚一点
+```
+
+Give the readings as options, name what each would mean concretely, and always
+offer "none of these" — an option list that does not contain the right answer
+teaches the human that answering is pointless.
+
+**`AskUserQuestion` works here even with nobody at a keyboard.** It is intercepted
+and relayed to a human in chat, and the answer comes back to you. Where no answer
+arrives, **stop** — do not file issues on a reading you were unsure enough about
+to ask about. A decomposition nobody agreed to costs more to unpick than to redo.
+
+Ask **one** question with the material choice in it, not five. On a phone, one
+question with four good options gets answered; five questions get ignored.
+
 ## Recon: write the delta, not the feature
 
 **Read the code before you write a slice.** Requirements are almost always
@@ -123,10 +168,17 @@ Grep the surface, not the obvious file: the page *and* its hook, the route *and*
 the service. A slice that names a real `file:line` is one a session can start on
 immediately; a slice that restates the feature request makes it redo your work.
 
-**Settle questions here, not in a slot.** Recon is free — no claim, no worktree,
-no session. If a slice's first task would be "find out whether X is true", find
-out now. An issue whose acceptance criteria could be satisfied by writing a
-comment is not an issue; it is a question you have not finished answering.
+**Settle questions here, not in a slot.** Recon is cheap compared to a session —
+no claim, no worktree, no development cycle. If a slice's first task would be
+"find out whether X is true", find out now. An issue whose acceptance criteria
+could be satisfied by writing a comment is not an issue; it is a question you have
+not finished answering.
+
+But cheap is not free, and it is only cheap once you are reading the right code —
+which is what the previous section is for. Bound it: enough to name a real
+`file:line` per slice and to know what already exists. You are writing a brief, not
+auditing the repository, and a decomposition that takes longer than the work it
+describes has got the ratio wrong.
 
 ## Sizing: one slice, one sitting
 
@@ -227,6 +279,18 @@ else, deliberately.
 The type label is an instruction, not a filing category: the swarm reads a bug
 label as "start from a red test that reproduces this", and a `runner::codex` label
 routes the issue to a different agent.
+
+## Never prefix a title with a state
+
+`[CLAIMED]`, `[WORKING]`, `[PAUSED]`, `[FINISHED]`, `[SKIP]` are the swarm's state
+machine, written by `claim` and `transition` — **never at creation**. A new issue
+belongs in the queue unclaimed, which is exactly what "no prefix" means.
+
+An issue created with one can never be picked up: `claim` refuses anything already
+prefixed, reading it as somebody else's work in progress. `loop create` now refuses
+such a title outright, because this happened for real — a session that had just
+read the state machine stamped `[FINISHED]` onto an issue it had itself filed,
+producing a queue entry nothing would ever touch.
 
 ## Draft, then create
 

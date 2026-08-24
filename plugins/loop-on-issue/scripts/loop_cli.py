@@ -874,6 +874,21 @@ def cmd_labels(args):
 
 def cmd_create(args):
     ctx = Ctx(args)
+
+    # The state machine lives in the title prefix, and `claim` refuses an issue
+    # that already carries one — it reads as somebody else's work in progress. An
+    # issue created with a prefix therefore can never be claimed by anything.
+    # Mechanical, so it belongs here rather than in a warning: a decomposition
+    # agent that had just read the state machine stamped [FINISHED] onto an issue
+    # it filed, and nothing downstream could have noticed.
+    prefix, _ = state_mod.split_state(args.title or "")
+    if prefix:
+        raise Precondition(
+            "title starts with the state prefix [{}]. A new issue belongs in the "
+            "queue unclaimed, and `claim` refuses anything already prefixed — this "
+            "one could never be picked up. Drop the prefix.".format(prefix)
+        )
+
     body = read_text(args.body, args.body_file)
     if not body.strip():
         # A body-less issue is triaged as [SKIP] ("no substantive content") and
