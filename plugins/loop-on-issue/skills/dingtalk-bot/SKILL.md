@@ -5,10 +5,21 @@ description: "Set up, operate, or switch off the optional DingTalk bot that give
 
 # The DingTalk bot
 
-**Entirely optional.** Everything in this plugin works without it: a question goes
-on the issue and the next scheduled run reads the answer. What the bot adds is
-speed — an answer in minutes rather than an interval — and a way to put work in
+**Optional, and beta.** This plugin is about coordinating development through the
+issue tracker; the bot is a side channel onto that board, not a second place work
+lives. Everything works without it — a question goes on the issue and the next
+scheduled run reads the answer. What it adds is speed, and a way to put work in
 from where the team already talks.
+
+Say so when setting it up. **The recommended way to run the swarm is a scheduled
+routine**, not the bot: each run is a fresh session that reconciles what the last
+one left, and a process that does not exist cannot hang. The bot keeps a listener
+alive, and `/dev` — starting a development session from chat — additionally has to
+supervise a subprocess, which is stateful in exactly the place everything else is
+deliberately not. What is there is thin on purpose: a recorded pid, a log file, a
+resumable session id, and `/cancel`. Attaching to a running session, pushing a
+message into one, or automatic recovery are **not** there. For anything past
+"start one and read the report", let a scheduled run do it.
 
 Throughout, `$LOOP` is the plugin's CLI:
 

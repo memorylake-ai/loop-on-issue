@@ -3,7 +3,7 @@
   "name": "loop-on-issue",
   "displayName": "Loop on Issue",
   "version": "0.1.0",
-  "description": "Unattended issue-to-PR pipeline for GitHub (gh) and GitLab (glab): decompose requirements into executable issues, drain a labelled queue with one resumable agent session per issue, and submit the change request.",
+  "description": "Coordinate development through the issue tracker on GitHub (gh) or GitLab (glab): decompose requirements into executable issues, drain a labelled queue with one resumable agent session per issue, and submit the change request. Optional beta chat channel for questions, reports and intake.",
   "author": {
     "name": "memorylake-ai",
     "url": "https://github.com/memorylake-ai"

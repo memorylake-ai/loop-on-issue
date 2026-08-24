@@ -1,12 +1,16 @@
 # loop-on-issue
 
-An unattended issue-to-change-request pipeline for **GitHub and GitLab**, packaged
-as one plugin for both **Claude Code** and **Codex**. This repository is also the
-marketplace you install it from.
+**Coordinating development through the issue tracker.** The board is where work is
+described, claimed, questioned, reported on and handed back — so that agents and
+people are reading the same thing, and no coordination lives anywhere a human
+cannot see it.
+
+Works against **GitHub and GitLab**, and installs into both **Claude Code** and
+**Codex**. This repository is also the marketplace you install it from.
 
 Queue an issue, and an agent claims it, develops it in its own git worktree, gets
-it reviewed, and opens the pull request or merge request — reporting every state
-change on the board so a human can watch, interrupt, or take over at any point.
+it reviewed, and opens the pull request or merge request — writing every state
+change onto the board so a human can watch, interrupt, or take over at any point.
 
 ```
   no prefix ──────► [CLAIMED] ──────► [WORKING] ──────► [FINISHED] ────► human
@@ -24,6 +28,53 @@ three seconds ago, one blocked on a human, and one awaiting merge. The title sho
 up in every issue list, notification email and board card, so humans and agents
 read the same state with no extra tooling, and a human can hand-edit a prefix to
 redirect the swarm.
+
+Everything else follows from putting coordination on the board rather than beside
+it:
+
+- **A question is a comment**, so it survives the process that asked, and can be
+  answered from a laptop, a phone, or the web UI a week later.
+- **An answer is a comment**, whoever gave it and wherever they were.
+- **Who is working what** is recorded there too, with the session id that resumes
+  it — so a later run reads it rather than recomputing it.
+- **A run's report** is written to the issues it touched, not only to whoever was
+  watching at the time.
+
+Which means there is no private queue, no coordination database, and nothing to
+resynchronise: if the board is right, the system is right.
+
+## Which parts to rely on
+
+| | Status | |
+|---|---|---|
+| The `loop` CLI, `doctor`, `init`, templates | **stable** | the parts everything else is built on |
+| `loop-issue-creator`, `forge-mr` | **stable** | invoked by hand or by a routine |
+| `loop-issue-swarm` driven by a **scheduled routine** | **stable** — the recommended way to run this | the design target: a recurring run that reconciles, claims, works and reports |
+| The DingTalk bot (questions, reports, intake) | **beta** | useful, and the newest thing here |
+| `/dev <issue>` — start a session from chat | **beta, most experimental** | see below |
+
+**The recommended way to run this unattended is a scheduled routine** — Claude
+Code's own recurring runs, or any tool that can invoke a skill on a timer —
+pointed at `loop-issue-swarm`. That path is what the whole state machine was
+designed around: each run is a fresh session, it reconciles what the last one left,
+and nothing needs to stay alive between runs. A process that does not exist cannot
+hang.
+
+The chat bot is a convenience on top of that, not a replacement for it. It is worth
+having — a blocker answered in two minutes instead of an interval, and requirements
+entering the queue from where the team talks — but it is younger code, and it keeps
+a process alive.
+
+**`/dev` is the most experimental part, and it is worth being precise about why.**
+Starting a development session from chat is headless session supervision, which is
+a genuinely harder problem than the rest of this: the process handle cannot outlive
+the listener that holds it, so supervision has to be stateful in exactly the place
+everything else is stateless. What is here is deliberately thin — the process id is
+recorded, the log is a file, the session id is derived so it can be resumed, and
+`/cancel` stops the process group. What is *not* here is what a real session
+manager gives you: attaching to a running session, pushing a message into one
+mid-flight, automatic recovery after a crash, or a live view of several at once.
+For anything beyond "start one and read the report", let a scheduled run do it.
 
 ## Install
 
@@ -174,9 +225,10 @@ window, and feeds the answer back to the model. Nothing answers within the windo
 and the session is told to pause, which is where it would have ended up anyway.
 Outside a loop session the hook does nothing and the tool behaves normally.
 
-## Chat channel (DingTalk) — optional
+## Chat channel (DingTalk) — optional, beta
 
-Off unless you set it up, and switchable off again at any time:
+A side channel onto the board, not a second place work lives. Off unless you set it
+up, and off again in one command:
 
 ```
 /loop-on-issue:init-dingtalk-bot     # guided setup
@@ -184,48 +236,21 @@ loop dingtalk disable                # and back on with `enable`
 ```
 
 Disabled, the plugin behaves exactly as one that never had the feature — the
-`AskUserQuestion` hook becomes a no-op and nothing is sent. Questions still land on
-issues and the swarm still reads answers from them; that path never depended on
-chat. Setup, operation and troubleshooting live in the `dingtalk-bot` skill and in
-[`plugins/loop-on-issue/dingtalk/README.md`](plugins/loop-on-issue/dingtalk/README.md).
+`AskUserQuestion` hook becomes a no-op and nothing is sent. Three jobs:
 
-Three jobs, and nothing else:
+1. **Relay questions** to a human and inject the answer back, as above.
+2. **Report a run** to the conversation and to each issue it touched.
+3. **Take requirements.** Anyone may raise one by sending a plain sentence; it is
+   held **locally**, outside any repository, until one named approver releases it
+   — and only then does an agent decompose it into queued issues. Nothing anyone
+   says reaches a repository unapproved, which is why `/dev <issue>` sits behind
+   the same gate.
 
-1. **Relay questions**, as above.
-2. **Report to both surfaces** — a run's summary to the conversation, and a note on
-   each issue the run touched, each written to be read on its own.
-3. **Take requirements.** Anyone may raise one by sending a plain sentence. It is
-   held **locally**, outside any repository, until the one configured approver
-   releases it — and only then does an agent decompose it into queued issues.
-
-**Nothing anyone says reaches a repository until the approver has said yes.** That
-gate is the only thing standing between a chat message and unattended code changes,
-which is why it is one named person, and why `/dev <issue>` — putting an agent on
-an existing issue right now — sits behind the same gate. Answering a question is
-open to anyone in an allow-listed conversation and records who answered, because
-that steers work a human already framed.
-
-Only a **quote-reply** answers a question; a plain sentence is always a
-requirement. There is no guessing between the two.
-
-One bot can serve several repositories. The registry is machine-level, because when
-a request arrives nobody has yet decided which one it belongs to, and each entry
-needs a local checkout as well as a project path — that is where the agent runs:
-
-```sh
-loop repos add loop  memorylake-ai/loop-on-issue  ~/github/loop-on-issue
-loop repos add bloom org/bloom                    ~/github/bloom
-loop repos default loop
-```
-
-A requirement goes to the default, and the approver redirects it in the same breath
-as approving (`同意 R20260824-01 bloom`). With several registered and no default, a
-bare requirement is refused rather than filed somewhere arbitrary.
-
-Approved work is drained by a **single serial worker** — two agents in one checkout
-fight over git state — and every job is durable, so a listener that dies mid-queue
-resumes on restart. The listener is the only component with a pip dependency
-(`dingtalk-stream`) and keeps its own virtualenv.
+Setup, commands, multi-repository routing and troubleshooting are in
+[`plugins/loop-on-issue/dingtalk/README.md`](plugins/loop-on-issue/dingtalk/README.md)
+and the `dingtalk-bot` skill. The listener is the only component with a pip
+dependency and keeps its own virtualenv; without it, everything above still works
+and you answer on the issue instead.
 
 ## Runners
 

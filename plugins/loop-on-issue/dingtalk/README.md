@@ -1,5 +1,10 @@
 # The DingTalk channel
 
+**Beta.** This plugin coordinates development through the issue tracker; this is a
+side channel onto that board. The recommended way to run the swarm remains a
+scheduled routine — see the repository README. Read this as an accessory, useful
+and younger than the rest.
+
 Three jobs, and nothing else:
 
 1. **Relay questions.** An unattended session that needs a human decision gets it
@@ -172,6 +177,15 @@ Requests nobody decides on expire after `intake_ttl`. Approved ones never do —
 that would pull work out from under the agent holding it.
 
 ## Putting an agent on an existing issue
+
+**The most experimental thing here.** Starting a session from chat is headless
+session supervision, and the process handle cannot outlive the listener holding it
+— so supervision is stateful where the rest of this is deliberately not. What
+exists is thin: the pid is recorded, the log is a file, the session id is derived
+so it can be resumed, and `/cancel` stops the process group. Attaching to a live
+session, pushing a message into one, and automatic recovery after a crash are not
+implemented. A scheduled swarm run does the same work without any of that, and is
+what to reach for unless you specifically want it started now.
 
 ```
 /dev 612            # the default repository
