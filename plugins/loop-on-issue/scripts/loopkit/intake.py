@@ -76,6 +76,10 @@ class Request:
     #: once — a second start collides with the session the first one left behind
     #: — so anything past the first has to resume instead.
     attempts: int = 0
+    #: Questions the agent put to a human while working, with their answers.
+    #: A decomposition has no issue to hold them, and it is the job that most
+    #: needs to ask: most ambiguity, least to check a reading against.
+    questions: List[Dict[str, Any]] = field(default_factory=list)
     session: str = ""
 
     # -- transitions ---------------------------------------------------------
@@ -144,6 +148,42 @@ class Request:
         self.finished_at = time.time()
         self.error = error
         return self
+
+    # -- asking a human ------------------------------------------------------
+    def ask(self, text: str, options: Optional[List[str]] = None) -> str:
+        """Record a question. Returns its id, which routes the answer back."""
+        question_id = "{}-q{}".format(self.id, len(self.questions) + 1)
+        self.questions.append({
+            "id": question_id,
+            "text": text,
+            "options": list(options or []),
+            "asked_at": time.time(),
+            "answer": None,
+            "by": "",
+            "answered_at": 0.0,
+        })
+        return question_id
+
+    def pending_question(self) -> Optional[Dict[str, Any]]:
+        for question in reversed(self.questions):
+            if question.get("answer") is None:
+                return question
+        return None
+
+    def answer(self, text: str, by: str = "") -> bool:
+        """Attach an answer to the open question, if there is one.
+
+        Refusing when nothing is open matters: a stray reply would otherwise
+        attach itself to a question already settled, and the record would show
+        two answers to one question with no way to tell which was meant.
+        """
+        question = self.pending_question()
+        if question is None:
+            return False
+        question["answer"] = text
+        question["by"] = by
+        question["answered_at"] = time.time()
+        return True
 
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -140,10 +140,18 @@ class Executor:
             try:
                 command = (runner_mod.resume_command("claude", session, prompt) if resuming
                            else runner_mod.start_command("claude", session, prompt))
+                # LOOP_INTAKE is what lets the AskUserQuestion hook reach a
+                # human from a job that has no issue yet. Without it the hook
+                # steps aside and the tool runs in a headless session where
+                # nobody can answer it.
+                env = dict(os.environ, LOOP_INTAKE=request.id)
+                env.pop("LOOP_ISSUE", None)
+                if request.kind == intake_mod.DEVELOP and request.issue:
+                    env["LOOP_ISSUE"] = str(request.issue)
                 proc = subprocess.run(
                     command,
                     cwd=entry.path, stdout=fh, stderr=subprocess.STDOUT,
-                    timeout=self.timeout,
+                    timeout=self.timeout, env=env,
                 )
                 code = proc.returncode
             except subprocess.TimeoutExpired:
@@ -230,10 +238,12 @@ class Executor:
             "The requirement, verbatim — this is the source of scope, and nothing outside "
             "it gets built:\n\n{text}\n\n"
             "Raised by: {who}\n{note}"
-            "Ground every slice in code you actually read, and draft before you create. "
-            "Nobody is at a keyboard: confirm the draft with `loop ask` and give it real "
-            "options, or if the requirement is unambiguous enough, proceed and say in the "
-            "report that you did.\n\n"
+            "Ground every slice in code you actually read, and draft before you create.\n\n"
+            "Nobody is at a keyboard, but you can still ask: `AskUserQuestion` is "
+            "intercepted and relayed to a human, so use it for anything where guessing "
+            "would decide the shape of the work. Give it real options. If nobody answers, "
+            "stop — do not file issues on an assumption you were unsure enough to ask "
+            "about.\n\n"
             "When you are done, write a short report to `{result}` listing each issue you "
             "created with its URL and one line on what it covers, plus anything you "
             "deliberately did not file. That file is what gets sent back to the person who "

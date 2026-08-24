@@ -502,17 +502,27 @@ HOOK_WAIT_MAX = 900
 
 _HOOK_ANSWERED = (
     "AskUserQuestion cannot be answered in an unattended session, so the question "
-    "was relayed to issue #{id} (and to chat if configured).\n\n"
+    "was relayed to {id} (and to chat if configured).\n\n"
     "A human answered:\n\n{answer}\n\n"
     "Continue from that answer. Do not call AskUserQuestion again for it."
 )
 
-_HOOK_UNANSWERED = (
+#: Two endings, because the right next move differs. An issue job has a state to
+#: move to; a decomposition has no issue yet, so all it can do is stop and say so.
+_HOOK_UNANSWERED_ISSUE = (
     "AskUserQuestion cannot be answered in an unattended session. The question is "
-    "now recorded on issue #{id} ({url}) and nobody has answered yet.\n\n"
+    "now recorded on {id} ({url}) and nobody has answered yet.\n\n"
     "Do not retry and do not guess. Transition the issue to PAUSED and end the "
     "session — the next scheduled run picks up the answer and resumes this same "
     "session with its context intact."
+)
+
+_HOOK_UNANSWERED_INTAKE = (
+    "AskUserQuestion cannot be answered in an unattended session. The question is "
+    "now recorded on request {id} and nobody has answered yet.\n\n"
+    "Do not retry and do not guess, and do not file issues on an assumption you "
+    "were unsure enough about to ask. Stop here, saying plainly what you are "
+    "waiting on — a retry resumes this same session once it is answered."
 )
 
 _HOOK_BROKEN = (
@@ -535,7 +545,8 @@ def cmd_hook(args):
     session — a developer's own interactive session must be untouched.
     """
     issue_id = (os.environ.get("LOOP_ISSUE") or "").strip()
-    if not issue_id.isdigit():
+    intake_id = (os.environ.get("LOOP_INTAKE") or "").strip()
+    if not issue_id.isdigit() and not intake_id:
         return 0
     if not dt_mod.enabled(dt_mod.load_env()):
         # The chat bot is optional and switched off. Let the tool through rather
@@ -554,12 +565,21 @@ def cmd_hook(args):
     text, options = _render_questions(questions)
     wait = hook_wait()
 
+    target = "#{}".format(issue_id) if issue_id.isdigit() else intake_id
     try:
-        ctx = Ctx(args)
-        result = ask_mod.ask(
-            ctx.forge, ctx.repo.path, int(issue_id), text,
-            options=options, wait=wait, notify=notifier(), index=pending_index(),
-        )
+        if issue_id.isdigit():
+            ctx = Ctx(args)
+            result = ask_mod.ask(
+                ctx.forge, ctx.repo.path, int(issue_id), text,
+                options=options, wait=wait, notify=notifier(), index=pending_index(),
+            )
+        else:
+            # A decomposition job: no issue exists yet, so the question goes on
+            # the request it is working from.
+            result = ask_mod.ask_intake(
+                intake_mod.Store(os.environ.get("LOOP_INTAKE_DIR") or None), intake_id, text,
+                options=options, wait=wait, notify=notifier(), index=pending_index(),
+            )
     except Exception as exc:  # noqa: BLE001
         print(_HOOK_BROKEN.format(error=exc), file=sys.stderr)
         return 2
@@ -569,10 +589,11 @@ def cmd_hook(args):
         rendered = "\n".join("- {}".format(c) for c in answer.choices) if answer.choices else answer.raw
         if answer.by:
             rendered += "\n\n(answered by {})".format(answer.by)
-        print(_HOOK_ANSWERED.format(id=issue_id, answer=rendered), file=sys.stderr)
+        print(_HOOK_ANSWERED.format(id=target, answer=rendered), file=sys.stderr)
         return 2
 
-    print(_HOOK_UNANSWERED.format(id=issue_id, url=result.url), file=sys.stderr)
+    template = _HOOK_UNANSWERED_ISSUE if issue_id.isdigit() else _HOOK_UNANSWERED_INTAKE
+    print(template.format(id=target, url=result.url or "—"), file=sys.stderr)
     return 2
 
 

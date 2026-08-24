@@ -330,3 +330,61 @@ class Retrying(unittest.TestCase):
         req.approve(by="J", auto=True)
         req.start()
         self.assertFalse(req.resuming)
+
+
+class Questions(unittest.TestCase):
+    """A decomposition job needs to be able to ask, too.
+
+    The hook covered "developing an issue" and missed "decomposing a
+    requirement" — the one with more ambiguity and less to check it against.
+    The first real run said so itself: "this is exactly what I would have put to
+    loop ask", about the ambiguity that decided the whole shape of the work.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="loop-intake-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.store = intake_mod.Store(self.dir)
+        self.req = self.store.save(intake_mod.Request(id="R1", text="做个东西"))
+
+    def test_a_request_starts_with_no_questions(self):
+        self.assertEqual(self.req.questions, [])
+
+    def test_asking_records_the_question_and_returns_its_id(self):
+        qid = self.req.ask("哪种 harness？", ["评测", "agent loop"])
+        self.store.save(self.req)
+        found = self.store.get("R1").questions[0]
+        self.assertEqual((found["id"], found["text"]), (qid, "哪种 harness？"))
+        self.assertEqual(found["options"], ["评测", "agent loop"])
+
+    def test_a_fresh_question_is_unanswered(self):
+        self.req.ask("哪种？", [])
+        self.assertIsNone(self.req.pending_question()["answer"])
+
+    def test_answering_the_open_question(self):
+        self.req.ask("哪种？", ["a", "b"])
+        self.req.answer("2", by="穆轩")
+        answered = self.store.save(self.req) and self.store.get("R1").questions[0]
+        self.assertEqual(answered["answer"], "2")
+        self.assertEqual(answered["by"], "穆轩")
+
+    def test_pending_question_is_the_newest_unanswered_one(self):
+        self.req.ask("第一个", [])
+        self.req.answer("答了", by="x")
+        second = self.req.ask("第二个", [])
+        self.assertEqual(self.req.pending_question()["id"], second)
+
+    def test_nothing_pending_once_everything_is_answered(self):
+        self.req.ask("唯一一个", [])
+        self.req.answer("好", by="x")
+        self.assertIsNone(self.req.pending_question())
+
+    def test_answering_with_nothing_pending_is_refused(self):
+        # Otherwise a stray reply would attach itself to a question that was
+        # already settled, and the record would show two answers to one question.
+        self.assertFalse(self.req.answer("späte Antwort", by="x"))
+
+    def test_questions_survive_a_round_trip(self):
+        self.req.ask("哪种？", ["a"])
+        self.store.save(self.req)
+        self.assertEqual(len(self.store.get("R1").questions), 1)

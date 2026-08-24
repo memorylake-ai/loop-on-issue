@@ -293,6 +293,10 @@ class Brain:
                     "这条回复找不到对应的问题（卡片可能已过期或已被回答）。",
                     bullets("`/q` 看还有哪些在等", "`/a <id> <文本>` 直接指定"),
                 )
+            if record.get("intake"):
+                # A decomposition job asked this; it has no issue yet, so the
+                # answer belongs on the request the job is working from.
+                return self._answer_intake(record, body, inbound, action.pqk)
             number = record["issue"]
             repo = record.get("repo") or self.default_repo
             options = record.get("options") or []
@@ -312,6 +316,22 @@ class Brain:
         if action.pqk:
             self.index.remove(action.pqk)
         return "已把你的答复写到 {}#{}。".format(repo, number)
+
+    def _answer_intake(self, record, body, inbound, pqk):
+        request = self.store.get(record["intake"])
+        if request is None:
+            return "找不到需求 `{}`，这条回复没有归处。".format(record["intake"])
+        if not request.answer(body, by=inbound.sender_nick):
+            return "**{}** 当前没有在等回答（可能刚被答过）。".format(request.id)
+        self.store.save(request)
+        if pqk:
+            self.index.remove(pqk)
+        options = record.get("options") or []
+        from .ask import parse_answer
+
+        parsed = parse_answer(body, options)
+        chosen = "（选了：{}）".format("、".join(parsed.choices)) if parsed.choices else ""
+        return "已把你的答复交给 **{}**{}，它会接着往下做。".format(request.id, chosen)
 
     # -- intake --------------------------------------------------------------
     def _intake(self, text: str, inbound: Inbound) -> str:  # noqa: C901
@@ -438,7 +458,9 @@ class Brain:
         return md(
             "**待答问题 {} 条**".format(len(records)),
             bullets(*[
-                "{}#{} {}".format(r.get("repo") or self.default_repo, r["issue"], r.get("url") or "")
+                ("**{}**（需求）· `{}`".format(r["intake"], r.get("repo") or "")
+                 if r.get("intake") else
+                 "{}#{} {}".format(r.get("repo") or self.default_repo, r["issue"], r.get("url") or ""))
                 for r in records[:20]
             ]),
             "引用回复那张卡片即可作答。",

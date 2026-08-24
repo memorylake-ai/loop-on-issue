@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional
 
 from . import pending, state
+from .errors import Precondition
 
 #: Only a reply that is *nothing but* numbers selects options. "2 because it is
 #: faster" is an explanation, and reading it as a bare selection would throw away
@@ -158,6 +159,98 @@ def ask(
         # sweep collects whatever is never answered.
         if pqk and answered:
             idx.remove(pqk)
+
+
+def ask_intake(
+    store: Any,
+    request_id: str,
+    question: str,
+    options: Optional[List[str]] = None,
+    wait: int = 0,
+    notify: Optional[Callable[[str, str], Optional[str]]] = None,
+    index: Optional[pending.Index] = None,
+    poll: int = 5,
+    clock: Callable[[], float] = time.time,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Result:
+    """Ask a human from a job that has no issue to hold the question.
+
+    Decomposing a requirement is the job that most needs to ask — the most
+    ambiguity, the least built to check a reading against — and it is the one
+    with nowhere to put the question, because the issues do not exist yet. So it
+    goes on the request, for the same reason the request itself is held locally:
+    it is the only durable thing there is at that point.
+    """
+    options = list(options or [])
+    request = store.get(request_id)
+    if request is None:
+        raise Precondition("no request {!r}".format(request_id))
+
+    question_id = request.ask(question, options)
+    store.save(request)
+
+    idx = index if index is not None else pending.Index()
+    pqk = None
+    notify_error = ""
+    if notify is not None:
+        try:
+            pqk = notify("**{}** 需要你拍板".format(request_id),
+                         _intake_card(request, question, options))
+        except Exception as exc:  # noqa: BLE001 - a chat outage must not lose the question
+            notify_error = str(exc)
+        if pqk:
+            idx.record(pqk, {"intake": request_id, "question": question_id,
+                             "options": options, "repo": request.repo})
+
+    try:
+        deadline = clock() + wait
+        while True:
+            current = store.get(request_id)
+            asked = _find_question(current, question_id)
+            if asked and asked.get("answer") is not None:
+                answer = parse_answer(asked["answer"], options)
+                answer.by = asked.get("by") or answer.by
+                answer.via = answer.via or "dingtalk"
+                return Result(True, 0, answer=answer, pqk=pqk, notify_error=notify_error)
+            remaining = deadline - clock()
+            if remaining <= 0:
+                return Result(False, 0, pqk=pqk, notify_error=notify_error)
+            sleep(min(poll, remaining))
+    finally:
+        if pqk:
+            # Unlike an issue question, this one has a definite end: the job it
+            # belongs to. Left behind, a later bare reply would answer a request
+            # that stopped listening.
+            current = store.get(request_id)
+            asked = _find_question(current, question_id) if current else None
+            if asked and asked.get("answer") is not None:
+                idx.remove(pqk)
+
+
+def _find_question(request, question_id):
+    if request is None:
+        return None
+    for question in request.questions:
+        if question.get("id") == question_id:
+            return question
+    return None
+
+
+def _intake_card(request, question, options):
+    from . import dingtalk
+
+    lines = ["**{}** · `{}`".format(request.id, request.repo), "",
+             "> {}".format(" ".join(request.text.split())[:80]), "",
+             question.strip(), ""]
+    if options:
+        for index, option in enumerate(options, 1):
+            lines.append("{}. {}".format(index, option))
+        lines.append("")
+        lines.append("_引用回复本条消息，回编号或直接写下你的答复。_")
+    else:
+        lines.append("_引用回复本条消息写下你的答复。_")
+    del dingtalk
+    return "\n".join(lines)
 
 
 def _card(repo, number, url, question, options):

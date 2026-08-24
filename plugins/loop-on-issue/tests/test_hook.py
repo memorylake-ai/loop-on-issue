@@ -222,3 +222,96 @@ class HookWait(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IntakeJobs(unittest.TestCase):
+    """A decomposition job has no issue, and is the one that most needs to ask.
+
+    The hook covered "developing an issue" and missed this — the job with the
+    most ambiguity and the least built to check a reading against. The first real
+    run said so in its own log: "this is exactly what I would have put to
+    loop ask", about the ambiguity that decided the shape of the whole thing.
+    """
+
+    def setUp(self):
+        import shutil
+        import tempfile
+
+        from loopkit import intake as intake_mod
+
+        self.dir = tempfile.mkdtemp(prefix="loop-hook-intake-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.saved = {k: os.environ.get(k)
+                      for k in ("LOOP_ISSUE", "LOOP_INTAKE", "LOOP_ASK_WAIT",
+                                "LOOP_DINGTALK_ENV", "LOOP_INTAKE_DIR")}
+        self.addCleanup(self._restore)
+        os.environ.pop("LOOP_ISSUE", None)
+        os.environ["LOOP_ASK_WAIT"] = "0"
+        os.environ["LOOP_DINGTALK_ENV"] = os.path.join(self.dir, "none.env")
+        os.environ["LOOP_INTAKE_DIR"] = os.path.join(self.dir, "intake")
+        self.store = intake_mod.Store(os.environ["LOOP_INTAKE_DIR"])
+        self.store.save(intake_mod.Request(id="R20260824-01", text="做个东西", repo="acme/widget"))
+
+    def _restore(self):
+        for key, value in self.saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _run(self, payload):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        saved_stdin = sys.stdin
+        sys.stdin = io.StringIO(json.dumps(payload))
+        try:
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = loop_cli.main(["hook", "ask-user-question"])
+        finally:
+            sys.stdin = saved_stdin
+        return code, stderr.getvalue()
+
+    def test_without_either_variable_the_tool_runs_normally(self):
+        os.environ.pop("LOOP_INTAKE", None)
+        code, _ = self._run({"tool_input": TOOL_INPUT})
+        self.assertEqual(code, 0)
+
+    def test_the_question_lands_on_the_request(self):
+        os.environ["LOOP_INTAKE"] = "R20260824-01"
+        self._run({"tool_input": TOOL_INPUT})
+        self.assertEqual(self.store.get("R20260824-01").questions[0]["text"],
+                         "Which storage backend?")
+
+    def test_nobody_answering_stops_the_job_rather_than_pausing_an_issue(self):
+        # There is no issue to pause, and filing issues on an assumption you were
+        # unsure enough to ask about is the failure worth naming.
+        os.environ["LOOP_INTAKE"] = "R20260824-01"
+        code, stderr = self._run({"tool_input": TOOL_INPUT})
+        self.assertEqual(code, 2)
+        self.assertIn("R20260824-01", stderr)
+        self.assertNotIn("PAUSED", stderr)
+        self.assertIn("do not file issues", stderr.lower().replace("do not file issues on", "do not file issues"))
+
+    def test_an_answer_comes_back_as_the_block_reason(self):
+        # The answer arrives while the hook waits, so it has to be delivered by
+        # something else — here, the store the listener would have written to.
+        os.environ["LOOP_INTAKE"] = "R20260824-01"
+        os.environ["LOOP_ASK_WAIT"] = "30"
+        original = self.store.__class__.get
+        calls = {"n": 0}
+
+        def get(store_self, rid):
+            calls["n"] += 1
+            request = original(store_self, rid)
+            if calls["n"] >= 2 and request and request.pending_question():
+                request.answer("2", by="穆轩")
+                original(store_self, rid) and store_self.save(request)
+            return request
+
+        self.store.__class__.get = get
+        try:
+            code, stderr = self._run({"tool_input": TOOL_INPUT})
+        finally:
+            self.store.__class__.get = original
+        self.assertEqual(code, 2)
+        self.assertIn("SQLite", stderr)
+        self.assertIn("穆轩", stderr)
