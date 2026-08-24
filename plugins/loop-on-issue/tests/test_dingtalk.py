@@ -272,3 +272,67 @@ class Switch(unittest.TestCase):
     def test_the_file_is_created_owner_only(self):
         dingtalk.set_enabled(self.path, True)
         self.assertEqual(oct(os.stat(self.path).st_mode & 0o777), "0o600")
+
+
+class OutboundTargeting(unittest.TestCase):
+    """A card belongs in the conversation the work came from.
+
+    With a fixed target, a requirement raised in a group produced questions that
+    went to one person's private chat — the group that asked never saw them, and
+    could not answer.
+    """
+
+    def _client(self, env):
+        self.calls = []
+
+        def http(url, payload, headers, method="POST"):
+            self.calls.append({"url": url, "payload": payload})
+            return ({"accessToken": "T", "expireIn": 999} if "accessToken" in url
+                    else {"processQueryKey": "K"})
+
+        return dingtalk.DingTalk(env, http=http)
+
+    BASE = {"DINGTALK_CLIENT_ID": "c", "DINGTALK_CLIENT_SECRET": "s",
+            "LOOP_DINGTALK_CONVERSATIONS": "cid-group,cid-other"}
+
+    def test_a_named_conversation_wins_over_every_default(self):
+        client = self._client(dict(self.BASE, LOOP_DINGTALK_DM_USERS="staff-1"))
+        client.send("t", "b", conversation_id="cid-group")
+        send = [c for c in self.calls if "Messages" in c["url"]][0]
+        self.assertIn("groupMessages", send["url"])
+        self.assertEqual(send["payload"]["openConversationId"], "cid-group")
+
+    def test_a_named_conversation_must_be_allow_listed(self):
+        # Otherwise a reply could be steered into a conversation the bot was never
+        # given, by anyone who could get a value into the record it reads.
+        client = self._client(self.BASE)
+        client.send("t", "b", conversation_id="cid-elsewhere")
+        send = [c for c in self.calls if "Messages" in c["url"]][0]
+        self.assertNotEqual(send["payload"].get("openConversationId"), "cid-elsewhere")
+
+    def test_without_a_named_conversation_the_configured_default_applies(self):
+        client = self._client(dict(self.BASE, LOOP_DINGTALK_DM_USERS="staff-1"))
+        client.send("t", "b")
+        self.assertTrue(any("oToMessages" in c["url"] for c in self.calls))
+
+    def test_a_private_chat_id_still_routes_one_to_one(self):
+        # A private conversation is allow-listed like any other, but its cards
+        # cannot go to the group endpoint — accepted there, never delivered.
+        client = self._client(dict(self.BASE,
+                                   LOOP_DINGTALK_CONVERSATIONS="cid-dm,cid-group",
+                                   LOOP_DINGTALK_DM_CONVERSATIONS="cid-dm",
+                                   LOOP_DINGTALK_DM_USERS="staff-1"))
+        client.send("t", "b", conversation_id="cid-dm")
+        self.assertTrue(any("oToMessages" in c["url"] for c in self.calls))
+
+    def test_a_group_in_the_same_deployment_still_gets_a_group_card(self):
+        # The two ids are indistinguishable, so which is which is stated rather
+        # than guessed — guessing is what produced cards accepted by the group
+        # endpoint and never delivered.
+        client = self._client(dict(self.BASE,
+                                   LOOP_DINGTALK_CONVERSATIONS="cid-dm,cid-group",
+                                   LOOP_DINGTALK_DM_CONVERSATIONS="cid-dm",
+                                   LOOP_DINGTALK_DM_USERS="staff-1"))
+        client.send("t", "b", conversation_id="cid-group")
+        send = [c for c in self.calls if "Messages" in c["url"]][0]
+        self.assertIn("groupMessages", send["url"])

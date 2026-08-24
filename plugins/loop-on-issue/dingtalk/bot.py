@@ -187,6 +187,12 @@ class Executor:
     def submit(self, request):
         self.queue.put(request.id)
 
+    def _notify(self, text, conversation=None):
+        try:
+            self.notify(text, conversation)
+        except TypeError:
+            self.notify(text)
+
     def cancel(self, request_id, by=""):
         """Stop a job and free the worker holding it."""
         request = self.store.get(request_id)
@@ -231,7 +237,7 @@ class Executor:
         if not entry or not os.path.isdir(entry.path):
             request.fail("no local checkout registered for {}".format(request.repo))
             self.store.save(request)
-            self.notify(self._failure_text(request))
+            self.notify(self._failure_text(request), request.conversation)
             return
 
         # Derive the session before starting, so `claude --resume <id>` can get
@@ -277,7 +283,7 @@ class Executor:
                 request.fail(str(exc))
                 self.store.save(request)
                 self._release_issue(request, entry)
-                self.notify(self._failure_text(request))
+                self.notify(self._failure_text(request), request.conversation)
                 return
             request.pid = proc.pid
             self.store.save(request)
@@ -289,7 +295,7 @@ class Executor:
                 request.fail("timed out after {}s and was stopped".format(self.timeout))
                 self.store.save(request)
                 self._release_issue(request, entry)
-                self.notify(self._failure_text(request))
+                self.notify(self._failure_text(request), request.conversation)
                 return
             finally:
                 self._processes.pop(request.id, None)
@@ -329,12 +335,12 @@ class Executor:
             request.fail(reason)
             self.store.save(request)
             self._release_issue(request, entry)
-            self.notify(self._failure_text(request))
+            self.notify(self._failure_text(request), request.conversation)
             return
 
         request.finish(issues=issues)
         self.store.save(request)
-        self.notify(self._success_text(request, result))
+        self.notify(self._success_text(request, result), request.conversation)
 
     def _release_issue(self, request, entry):
         """Hand a failed development job's issue back to a human.
@@ -547,6 +553,7 @@ def inbound_from(data: dict) -> listener_mod.Inbound:
         # The key that makes a quote-reply route exactly.
         pqk=data.get("originalProcessQueryKey") or None,
         session_webhook=data.get("sessionWebhook") or "",
+        conversation_type=str(data.get("conversationType") or ""),
     )
 
 
@@ -598,14 +605,15 @@ def run(env, repo_root):
 
     client_out = dt_mod.DingTalk(env)
 
-    def announce(text):
-        """Say something into the configured conversation, unprompted.
+    def announce(text, conversation=None):
+        """Say something unprompted, where the work came from.
 
-        Used when a job finishes: whoever asked has long since stopped watching
-        the thread their request came from.
+        Used when a job finishes: whoever asked stopped watching long ago, and a
+        result delivered to a different conversation than the request reaches
+        nobody who was waiting for it.
         """
         try:
-            client_out.send("loop", text)
+            client_out.send("loop", text, conversation_id=conversation)
         except Exception as exc:  # noqa: BLE001
             log.warning("could not announce: %s", exc)
 

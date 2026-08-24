@@ -528,3 +528,28 @@ class DeferredWorkIsVisible(Base):
         self.brain.cancel_job = lambda rid, by: (True, "已停掉 " + rid)
         self.assertIn("已停掉", self.brain.handle(
             msg(text="/cancel " + request.id, msg_id="m2", sender=self.APPROVER)))
+
+
+class WorkAnswersWhereItCame(Base):
+    """A requirement raised in a group keeps its conversation.
+
+    Replies ride the inbound session webhook and always land correctly. Cards the
+    bot *initiates* — a question mid-job, a finished report — used a fixed target,
+    so work raised in a group produced questions in one person's private chat that
+    the group never saw and could not answer.
+    """
+
+    def test_the_conversation_is_recorded_with_the_requirement(self):
+        self.brain.handle(msg(text="做个东西", conversation="cid-1", sender="somebody"))
+        self.assertEqual(self.store.all()[0].conversation, "cid-1")
+
+    def test_it_survives_approval_and_queueing(self):
+        self.brain.handle(msg(text="做个东西", conversation="cid-1", sender="somebody"))
+        request = self.store.all()[0]
+        self.brain.handle(msg(text="同意 " + request.id, msg_id="m2", sender=self.APPROVER))
+        self.assertEqual(self.enqueued[0].conversation, "cid-1")
+
+    def test_a_development_job_records_where_it_was_asked_for(self):
+        self.forge.add(612)
+        self.brain.handle(msg(text="/dev 612", conversation="cid-1", sender=self.APPROVER))
+        self.assertEqual(self.enqueued[0].conversation, "cid-1")

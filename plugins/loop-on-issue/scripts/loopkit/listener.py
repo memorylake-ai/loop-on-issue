@@ -97,6 +97,9 @@ class Inbound:
     conversation_id: str = ""
     pqk: Optional[str] = None
     session_webhook: str = ""
+    #: DingTalk's own answer to "group or private chat", which the ids do not
+    #: reveal. "1" is one-to-one, "2" is a group.
+    conversation_type: str = ""
 
 
 @dataclass
@@ -477,14 +480,23 @@ class Brain:
         Answered from any conversation on purpose — see ALLOWLIST_EXEMPT.
         """
         listed = inbound.conversation_id in self.conversations
+        private = inbound.conversation_type == "1"
+        lines = [
+            '`LOOP_DINGTALK_APPROVER="{}"`'.format(inbound.sender_id or "?"),
+            '`LOOP_DINGTALK_APPROVER_NICK="{}"`'.format(inbound.sender_nick or ""),
+            '`LOOP_DINGTALK_CONVERSATIONS="{}"`  ← 逗号分隔，追加而不是覆盖'.format(
+                inbound.conversation_id or "?"),
+        ]
+        if private:
+            # Group and private ids look alike, so which is which is stated. A card
+            # sent to the group endpoint with a private id is accepted and never
+            # delivered — nothing errors, it simply does not arrive.
+            lines.append('`LOOP_DINGTALK_DM_CONVERSATIONS="{}"`  ← 这是私聊，必须标出来'.format(
+                inbound.conversation_id))
         return md(
-            "你是 **{}**".format(inbound.sender_nick or "?"),
+            "你是 **{}**（{}）".format(inbound.sender_nick or "?", "私聊" if private else "群"),
             "**粘进 `~/.loop-on-issue/dingtalk.env`**",
-            bullets(
-                '`LOOP_DINGTALK_APPROVER="{}"`'.format(inbound.sender_id or "?"),
-                '`LOOP_DINGTALK_APPROVER_NICK="{}"`'.format(inbound.sender_nick or ""),
-                '`LOOP_DINGTALK_CONVERSATIONS="{}"`'.format(inbound.conversation_id or "?"),
-            ),
+            bullets(*lines),
             "本会话{}在白名单里。".format("已经" if listed else "**还不**"),
         )
 

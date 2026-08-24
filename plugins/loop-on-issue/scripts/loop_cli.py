@@ -64,11 +64,15 @@ def read_text(inline, path):
     return inline or ""
 
 
-def notifier(dry_run: bool = False):
+def notifier(dry_run: bool = False, conversation: str = None):
     """A `(title, text) -> pqk|None` callable, or None when nothing is configured.
 
     Returning None rather than raising is deliberate: DingTalk is an accelerant,
     not the channel. The issue comment is what has to work.
+
+    `conversation` is where the work came from. A question about something raised
+    in a group belongs in that group — sending it to a fixed target means the
+    people who asked never see it and cannot answer.
     """
     env = dt_mod.load_env()
     client = dt_mod.DingTalk(env)
@@ -76,7 +80,7 @@ def notifier(dry_run: bool = False):
         return None
     if dry_run:
         return lambda title, text: None
-    return client.send
+    return lambda title, text: client.send(title, text, conversation_id=conversation)
 
 
 def pending_index():
@@ -576,9 +580,12 @@ def cmd_hook(args):
         else:
             # A decomposition job: no issue exists yet, so the question goes on
             # the request it is working from.
+            store = intake_mod.Store(os.environ.get("LOOP_INTAKE_DIR") or None)
+            request = store.get(intake_id)
             result = ask_mod.ask_intake(
-                intake_mod.Store(os.environ.get("LOOP_INTAKE_DIR") or None), intake_id, text,
-                options=options, wait=wait, notify=notifier(), index=pending_index(),
+                store, intake_id, text, options=options, wait=wait,
+                notify=notifier(conversation=request.conversation if request else None),
+                index=pending_index(),
             )
     except Exception as exc:  # noqa: BLE001
         print(_HOOK_BROKEN.format(error=exc), file=sys.stderr)

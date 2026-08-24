@@ -141,6 +141,16 @@ def set_enabled(path: str, on: bool) -> str:
     return path
 
 
+def _dm_conversations(env: Dict[str, str]) -> List[str]:
+    """Allow-listed conversations that are private chats rather than groups.
+
+    Their ids look alike, so this cannot be inferred — it is stated. Empty means
+    "the DM target is not tied to a conversation", which is the single-user setup.
+    """
+    raw = (env.get("LOOP_DINGTALK_DM_CONVERSATIONS") or "").strip()
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def sign_webhook(url: str, secret: str, timestamp_ms: Optional[int] = None) -> str:
     if not secret:
         return url
@@ -250,13 +260,23 @@ class DingTalk:
         half of a dual write vanish unnoticed.
         """
         if self.configured:
-            # A private chat first, when one is configured: a card sent to a group
-            # endpoint with a one-to-one conversation id is silently accepted and
-            # never delivered.
+            allowed = conversations(self.env)
             users = dm_users(self.env)
-            if users and not conversation_id:
+
+            # A named conversation is where the work came from, and outranks any
+            # default — a question about something raised in a group belongs in
+            # that group, not in one person's private chat. It must still be
+            # allow-listed: otherwise a reply could be steered somewhere the bot
+            # was never given, by anyone who can get a value into the record it
+            # reads from.
+            target = conversation_id if conversation_id in allowed else None
+
+            # A one-to-one conversation is allow-listed like any other, but its
+            # cards cannot go to the group endpoint — accepted there, and never
+            # delivered.
+            if users and (target is None or target in _dm_conversations(self.env)):
                 return self.send_dm(users[0], title, text) or ""
-            target = conversation_id or (conversations(self.env)[:1] or [None])[0]
+            target = target or (allowed[:1] or [None])[0]
             if target:
                 return self.send_group(target, title, text) or ""
         if self.env.get("LOOP_DINGTALK_WEBHOOK"):
