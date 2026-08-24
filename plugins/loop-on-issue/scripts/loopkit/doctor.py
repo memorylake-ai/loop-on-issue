@@ -154,6 +154,7 @@ def diagnose(cwd: Optional[str] = None, config: Optional[Any] = None) -> Report:
     _check_templates(report, repo, config, root)
     _check_runner(report, config)
     _check_base_branch(report, config, root)
+    _check_link(report)
     _check_chat(report, config)
     return report
 
@@ -386,6 +387,26 @@ def _check_runner(report: Report, config: Any) -> None:
         )
     else:
         report.add("verify.command", "Verification command", OK, config.verify_command)
+
+
+def _check_link(report: Report) -> None:
+    """Is the CLI findable by name?
+
+    Skills fall back to scanning the plugin directories when it is not, which
+    works but rescans two trees every session and breaks whenever a version bump
+    moves the plugin cache.
+    """
+    from . import link as link_mod
+
+    found = which(link_mod.NAME)
+    if found:
+        report.add("cli.onpath", "loop on PATH", OK, found)
+        return
+    report.add(
+        "cli.onpath", "loop on PATH", WARN,
+        "not findable by name; skills fall back to scanning the plugin directories",
+        "loop init --yes --link",
+    )
 
 
 def _check_chat(report: Report, config: Any) -> None:

@@ -30,6 +30,7 @@ from loopkit import ask as ask_mod  # noqa: E402
 from loopkit import config as cfg  # noqa: E402
 from loopkit import dingtalk as dt_mod  # noqa: E402
 from loopkit import intake as intake_mod  # noqa: E402
+from loopkit import link as link_mod  # noqa: E402
 from loopkit import pending  # noqa: E402
 from loopkit import repos as repos_mod  # noqa: E402
 from loopkit import doctor as doctor_mod  # noqa: E402
@@ -168,15 +169,37 @@ def cmd_init(args):
                 mark = "+" if action.status == scaffold.CREATE else (
                     "~" if action.status == scaffold.OVERWRITE else "=")
                 print("  {} {:<44} {}".format(mark, action.target, action.detail))
+            if args.link:
+                print("  + {:<44} {}".format(
+                    os.path.join(os.path.expanduser(args.link_dir or link_mod.choose_dir()), "loop"),
+                    "symlink, so skills find the CLI by name"))
             print("\nRe-run with --yes to apply. Nothing has been written.")
         return 0
 
     scaffold.apply(actions, ctx.root, ctx.forge if existing is not None else None)
+
+    linked = None
+    if args.link:
+        linked = link_mod.install(link_mod.current_source(), args.link_dir)
     if args.json:
-        out({"planned": [a.as_dict() for a in actions], "applied": True})
+        payload = {"planned": [a.as_dict() for a in actions], "applied": True}
+        if linked:
+            payload["link"] = {"status": linked.status, "path": linked.path,
+                               "detail": linked.detail or None}
+        out(payload)
     else:
         for action in actions:
             print("{:<9} {}".format(action.status, action.target))
+        if linked:
+            print("{:<9} {}{}".format(
+                linked.status, linked.path,
+                "  ({})".format(linked.detail) if linked.detail else ""))
+            if linked.status in (link_mod.CREATED, link_mod.REPOINTED):
+                on_path = os.path.dirname(linked.path).rstrip("/") in [
+                    e.rstrip("/") for e in os.environ.get("PATH", "").split(os.pathsep) if e]
+                if not on_path:
+                    print("           note: {} is not on your PATH, so `loop` will still "
+                          "not be found by name.".format(os.path.dirname(linked.path)))
         print("\nNext: `loop doctor` to confirm, and set \"assignee\" and "
               "\"verify_command\" in {}/{}.".format(cfg.CONFIG_DIR, cfg.CONFIG_FILE))
     failed = [a for a in actions if a.status == scaffold.FAILED]
@@ -910,6 +933,10 @@ def build_parser():
     sp.add_argument("--yes", action="store_true", help="apply the plan (without this, plan only)")
     sp.add_argument("--lang", choices=("en", "zh"), help="template language")
     sp.add_argument("--force", action="store_true", help="overwrite files that already exist")
+    sp.add_argument("--link", action="store_true",
+                    help="symlink `loop` onto PATH, so skills find it by name instead "
+                         "of rescanning the plugin directories every session")
+    sp.add_argument("--link-dir", help="where to put it (default: ~/.local/bin if on PATH)")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_init)
 
