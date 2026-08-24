@@ -20,6 +20,16 @@ from typing import Dict, List, Optional
 DEFAULT_PATH = os.path.join(os.path.expanduser("~"), ".loop-on-issue", "repos.json")
 
 
+def default_path() -> str:
+    """Where the registry lives; ``LOOP_REPOS`` overrides it.
+
+    The override keeps tests off the real machine-level file, and lets a machine
+    that runs more than one bot identity keep their registries apart — the same
+    reason ``LOOP_DINGTALK_ENV`` and ``LOOP_PENDING_DIR`` exist.
+    """
+    return os.environ.get("LOOP_REPOS") or DEFAULT_PATH
+
+
 class RegistryError(Exception):
     """The registry file is unusable, and guessing would be worse."""
 
@@ -42,7 +52,7 @@ class Registry:
     # -- loading -------------------------------------------------------------
     @classmethod
     def load(cls, path: Optional[str] = None) -> "Registry":
-        path = path or DEFAULT_PATH
+        path = path or default_path()
         if not os.path.isfile(path):
             # A bot serving a single repository never needs this file.
             return cls()
@@ -68,7 +78,7 @@ class Registry:
         return cls(entries, data.get("default"))
 
     def save(self, path: Optional[str] = None) -> str:
-        path = path or DEFAULT_PATH
+        path = path or default_path()
         directory = os.path.dirname(path)
         if directory:
             os.makedirs(directory, exist_ok=True)

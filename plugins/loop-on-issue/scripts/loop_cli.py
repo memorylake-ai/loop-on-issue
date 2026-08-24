@@ -34,7 +34,7 @@ from loopkit import link as link_mod  # noqa: E402
 from loopkit import pending  # noqa: E402
 from loopkit import repos as repos_mod  # noqa: E402
 from loopkit import doctor as doctor_mod  # noqa: E402
-from loopkit import remotes, runner as runner_mod, scaffold  # noqa: E402
+from loopkit import discovery, remotes, runner as runner_mod, scaffold  # noqa: E402
 from loopkit import state as state_mod  # noqa: E402
 from loopkit import templates as tpl  # noqa: E402
 from loopkit.errors import ERROR, PRECONDITION, Precondition  # noqa: E402
@@ -96,6 +96,8 @@ class Ctx:
             assignee=getattr(args, "assignee", None),
             runner=getattr(args, "runner", None),
             template_lang=getattr(args, "lang", None),
+            verify_command=getattr(args, "verify_command", None),
+            base_branch=getattr(args, "base_branch", None),
         )
         self.config.validate()
 
@@ -156,8 +158,18 @@ def cmd_init(args):
         print("note: cannot read labels yet ({}); the queue label will be skipped".format(exc),
               file=sys.stderr)
 
+    # Wire the base branch to the remote's actual default unless the config or a
+    # flag already stated one. Left at the "origin/main" default, a repo whose
+    # default is "master" gets a base that does not resolve, and no worktree can
+    # start — the failure lands far from its cause.
+    config = ctx.config
+    if not getattr(args, "base_branch", None) and config.base_branch == cfg.DEFAULTS["base_branch"]:
+        detected = remotes.default_base_ref(ctx.root)
+        if detected:
+            config = config.with_overrides(base_branch=detected)
+
     actions = scaffold.plan(
-        ctx.root, ctx.repo, ctx.config, lang=args.lang, force=args.force, existing_labels=existing
+        ctx.root, ctx.repo, config, lang=args.lang, force=args.force, existing_labels=existing
     )
 
     if not args.yes:
@@ -178,11 +190,26 @@ def cmd_init(args):
 
     scaffold.apply(actions, ctx.root, ctx.forge if existing is not None else None)
 
+    registered = None
+    if getattr(args, "register", False):
+        # Fold the machine-level registration into the same call, preserving any
+        # existing default: a lone repo is the default implicitly and that is not
+        # persisted, so adding one without writing the old default down first would
+        # silently redirect every chat requirement into the newcomer.
+        registry = repos_mod.Registry.load()
+        previous = registry.default
+        registered = ctx.repo.path.rstrip("/").rsplit("/", 1)[-1]
+        registry.add(registered, ctx.repo.path, ctx.root)
+        registry.set_default(previous.name if previous else registered)
+        registry.save()
+
     linked = None
     if args.link:
         linked = link_mod.install(link_mod.current_source(), args.link_dir)
     if args.json:
         payload = {"planned": [a.as_dict() for a in actions], "applied": True}
+        if registered:
+            payload["registered"] = {"name": registered, "repo": ctx.repo.path, "path": ctx.root}
         if linked:
             payload["link"] = {"status": linked.status, "path": linked.path,
                                "detail": linked.detail or None}
@@ -200,6 +227,8 @@ def cmd_init(args):
                 if not on_path:
                     print("           note: {} is not on your PATH, so `loop` will still "
                           "not be found by name.".format(os.path.dirname(linked.path)))
+        if registered:
+            print("registered {} → {} in the bot registry".format(registered, ctx.repo.path))
         print("\nNext: `loop doctor` to confirm, and set \"assignee\" and "
               "\"verify_command\" in {}/{}.".format(cfg.CONFIG_DIR, cfg.CONFIG_FILE))
     failed = [a for a in actions if a.status == scaffold.FAILED]
@@ -690,6 +719,26 @@ def cmd_repos(args):
     machine-level because a bot taking requirements in chat has to know about
     several before it knows which one a request belongs to.
     """
+    if args.action == "discover":
+        if not args.name:
+            raise CommandError("usage: loop repos discover <workspace directory>")
+        container = os.path.abspath(os.path.expanduser(args.name))
+        found = discovery.discover(container)
+        if args.json:
+            out({"container": container, "repos": found})
+        elif not found:
+            print("no git repositories found directly under {}".format(container))
+        else:
+            for entry in found:
+                flags = [f for f, on in (("registered", entry["registered"]),
+                                         ("has .loop-on-issue", entry["has_config"])) if on]
+                print("{:<24} {:<8} {}{}".format(
+                    entry["name"], entry["forge"] or "?", entry["repo"] or "(forge unknown)",
+                    "   [{}]".format(", ".join(flags)) if flags else ""))
+                if entry["verify_candidates"]:
+                    print("{:<24} verify? {}".format("", "  |  ".join(entry["verify_candidates"])))
+        return 0
+
     registry = repos_mod.Registry.load()
     if args.action == "add":
         if not (args.name and args.repo_path and args.path):
@@ -718,13 +767,13 @@ def cmd_repos(args):
         "default": default.name if default else None,
         "repos": [{"name": e.name, "repo": e.repo, "path": e.path,
                    "exists": os.path.isdir(e.path)} for e in registry.all()],
-        "path": repos_mod.DEFAULT_PATH,
+        "path": repos_mod.default_path(),
     }
     if args.json:
         out(payload)
     else:
         if not payload["repos"]:
-            print("no repositories registered ({})".format(repos_mod.DEFAULT_PATH))
+            print("no repositories registered ({})".format(repos_mod.default_path()))
         for entry in payload["repos"]:
             print("{:<20} {:<40} {}{}".format(
                 entry["name"], entry["repo"], entry["path"],
@@ -973,6 +1022,14 @@ def build_parser():
                     help="symlink `loop` onto PATH, so skills find it by name instead "
                          "of rescanning the plugin directories every session")
     sp.add_argument("--link-dir", help="where to put it (default: ~/.local/bin if on PATH)")
+    sp.add_argument("--assignee", help="whose queue this is; the swarm filters on it")
+    sp.add_argument("--verify-command", dest="verify_command",
+                    help="this repository's real test/lint command")
+    sp.add_argument("--base-branch", dest="base_branch",
+                    help="what worktrees branch from (default: the remote's default "
+                         "branch, else origin/main)")
+    sp.add_argument("--register", action="store_true",
+                    help="also record this repo in the machine-level bot registry")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_init)
 
@@ -1074,8 +1131,9 @@ def build_parser():
 
     sp = sub.add_parser("repos", help="repositories this machine's bot serves")
     sp.add_argument("action", nargs="?", default="list",
-                    choices=("list", "add", "remove", "default"))
-    sp.add_argument("name", nargs="?", help="short name used in chat")
+                    choices=("list", "add", "remove", "default", "discover"))
+    sp.add_argument("name", nargs="?", help="short name used in chat "
+                    "(for `discover`: the workspace directory to scan)")
     sp.add_argument("repo_path", nargs="?", metavar="OWNER/NAME")
     sp.add_argument("path", nargs="?", metavar="CHECKOUT")
     sp.add_argument("--json", action="store_true")
