@@ -178,13 +178,13 @@ class PlaceholdersAreDistinguishable(unittest.TestCase):
 
     def test_the_two_kinds_of_number_are_named_differently(self):
         # A requirement id and an issue number are not interchangeable anywhere.
-        self.assertIn("R编号", listener.HELP)
-        self.assertIn("issue 号", listener.HELP)
+        self.assertIn("R-ID", listener.HELP)
+        self.assertIn("issue-id", listener.HELP)
 
     def test_the_help_shows_what_each_looks_like(self):
         # The shapes are unmistakable; showing them beats naming them.
         self.assertIn("R20260824-01", listener.HELP)
-        self.assertIn("#612", listener.HELP)
+        self.assertIn("demo-gh:612", listener.HELP)
 
     def test_issue_commands_all_use_the_same_placeholder(self):
         import re

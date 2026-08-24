@@ -223,36 +223,36 @@ HELP = md(
     ),
     "**两种编号，别弄混**",
     bullets(
-        "`<R编号>` — 一条**需求**，形如 `R20260824-01`",
-        "`<issue 号>` — 一个 **issue**，形如 `#612` 或 `612`",
+        "`<R-ID>` — 一条**需求**，形如 `R20260824-01`",
+        "`<issue-id>` — 一个 **issue**，形如 `#612` 或 `612`",
     ),
     "**提需求 / 查看**",
     bullets(
         "`/new [仓库] <需求>` — 提需求，与直接发一句话等价",
         "`/p` — 在办的需求（待审批 · 排队中 · 执行中）",
-        "`/r <R编号>` — 某条需求：状态 · 审批 · 产物",
+        "`/r <R-ID>` — 某条需求：状态 · 审批 · 产物",
         "`/q` — 待答问题",
         "`/ls [状态]` — issue 队列",
-        "`/i <issue 号>` — 某个 issue",
+        "`/i <issue-id>` — 某个 issue，跨仓库写 `demo-gh:612`",
         "`/repos` — 本机服务的仓库",
     ),
     "**作答**",
     bullets(
         "引用回复问题卡片（可一次回多个编号）",
-        "`/a <issue 号> <文本>` — 直接答某个 issue",
+        "`/a <issue-id> <文本>` — 直接答某个 issue",
     ),
     "**仅审批人**",
     bullets(
-        "`同意 <R编号> [仓库] [备注]` — 批准，也可写 `/approve`",
-        "`拒绝 <R编号> <理由>` — 驳回，也可写 `/reject`",
-        "`/repo <R编号> <仓库>` — 改归哪个仓库（开跑前有效）",
-        "`/cancel <R编号>` — 停掉卡住的任务，释放 worker",
-        "`/dev <issue 号> [仓库]` — 让 agent 现在就去开发这个 issue",
+        "`同意 <R-ID> [仓库] [备注]` — 批准，也可写 `/approve`",
+        "`拒绝 <R-ID> <理由>` — 驳回，也可写 `/reject`",
+        "`/repo <R-ID> <仓库>` — 改归哪个仓库（开跑前有效）",
+        "`/cancel <R-ID>` — 停掉卡住的任务，释放 worker",
+        "`/dev <issue-id> [仓库]` — 让 agent 现在就去开发这个 issue",
     ),
     "**看板维护**",
     bullets(
-        "`/skip <issue 号> confirm <理由>` — 退掉一条 issue",
-        "`/requeue <issue 号> confirm` — 放回队列",
+        "`/skip <issue-id> confirm <理由>` — 退掉一条 issue",
+        "`/requeue <issue-id> confirm` — 放回队列",
         "`/report` — 重发上轮报告",
     ),
     "**其他**",
@@ -523,19 +523,40 @@ class Brain:
             blocks.append(bullets(*rows[:10]))
         return md(*blocks)
 
+    def _resolve_issue_repo(self, token):
+        """Which repository an issue reference points at, or a message saying why not."""
+        if token:
+            entry = self.registry.get(token)
+            if not entry:
+                return None, md(
+                    "不认识仓库 `{}`。".format(token),
+                    bullets(*["`{}` → `{}`".format(e.name, e.repo) for e in self.registry.all()]),
+                )
+            return entry.repo, None
+        default = self.registry.default
+        if default is None:
+            return None, md(
+                "这台机器服务多个仓库且没有默认，说清楚是哪个的 issue。",
+                bullets(*["`{}:<issue-id>`".format(e.name) for e in self.registry.all()]),
+            )
+        return default.repo, None
+
     def _cmd_i(self, rest, inbound):
-        number = _first_int(rest)
+        token, number, _ = parse_issue_ref(rest)
         if number is None:
-            return "用法：`/i <issue 号>`，例如 `/i 612`"
-        forge = self.forge_for(self.default_repo)
+            return "用法：`/i <issue-id>`，例如 `/i 612` 或 `/i demo-gh:612`"
+        repo, problem = self._resolve_issue_repo(token)
+        if problem:
+            return problem
+        forge = self.forge_for(repo)
         try:
             issue = forge.get_issue(number)
         except Exception:  # noqa: BLE001
-            return "找不到 #{}。".format(number)
+            return "在 `{}` 里找不到 #{}。".format(repo, number)
         st, base = state.split_state(issue.title)
         marker = state.latest_marker(forge.list_issue_comments(number)) or {}
         return md(
-            "**#{} {}**".format(number, base),
+            "**{}#{} {}**".format(repo, number, base),
             bullets(
                 "状态：{}".format(st or "UNCLAIMED"),
                 "runner：{}".format(marker.get("runner") or "—"),
@@ -545,11 +566,13 @@ class Brain:
         )
 
     def _cmd_a(self, rest, inbound):
-        number = _first_int(rest)
-        text = re.sub(r"^\s*#?\d+\s*", "", rest or "", count=1).strip()
+        token, number, text = parse_issue_ref(rest)
         if number is None or not text:
-            return "用法：`/a <issue 号> <你的答复>`，例如 `/a 612 用第二个方案`"
-        return self._answer(Action(ANSWER), inbound, number=number, repo=self.default_repo, text=text)
+            return "用法：`/a <issue-id> <你的答复>`，例如 `/a 612 用第二个方案`"
+        repo, problem = self._resolve_issue_repo(token)
+        if problem:
+            return problem
+        return self._answer(Action(ANSWER), inbound, number=number, repo=repo, text=text)
 
     def _cmd_new(self, rest, inbound):
         if not (rest or "").strip():
@@ -561,7 +584,7 @@ class Brain:
         request_id, remainder = _split_id(rest)
         request = self.store.get(request_id) if request_id else None
         if not request:
-            return "用法：`/repo <R编号> <仓库名字>`，例如 `/repo R20260824-01 demo-gl`"
+            return "用法：`/repo <R-ID> <仓库名字>`，例如 `/repo R20260824-01 demo-gl`"
         entry = self.registry.get((remainder or "").strip().split(" ")[0])
         if not entry:
             return md(
@@ -619,7 +642,7 @@ class Brain:
         if not request:
             return md(
             "找不到需求 `{}`。".format((rest or "").strip() or "（空）"),
-            bullets("需求编号形如 `R20260824-01`；issue 号请用 `/i <号>`",
+            bullets("需求 ID 形如 `R20260824-01`；issue 请用 `/i <issue-id>`",
                     "`/p` 看在办的需求"),
         )
         facts = ["提出：{}".format(request.requester or "?")]
@@ -659,7 +682,7 @@ class Brain:
     def _cmd_approve(self, rest, inbound):
         request_id, remainder = _split_id(rest)
         if not request_id:
-            return "用法：`同意 <R编号> [仓库] [备注]`，例如 `同意 R20260824-01`"
+            return "用法：`同意 <R-ID> [仓库] [备注]`，例如 `同意 R20260824-01`"
         request = self.store.get(request_id)
         if not request:
             return "找不到 `{}`。用 `/p` 看待审批的。".format(request_id)
@@ -683,7 +706,7 @@ class Brain:
     def _cmd_reject(self, rest, inbound):
         request_id, reason = _split_id(rest)
         if not request_id:
-            return "用法：`拒绝 <R编号> <理由>`，例如 `拒绝 R20260824-01 已经做过了`"
+            return "用法：`拒绝 <R-ID> <理由>`，例如 `拒绝 R20260824-01 已经做过了`"
         request = self.store.get(request_id)
         if not request:
             return "找不到 `{}`。".format(request_id)
@@ -701,7 +724,7 @@ class Brain:
         request_id, _ = _split_id(rest)
         request = self.store.get(request_id) if request_id else None
         if not request:
-            return md("用法：`/cancel <R编号>`，例如 `/cancel R20260824-01`", "`/p` 看在办的。")
+            return md("用法：`/cancel <R-ID>`，例如 `/cancel R20260824-01`", "`/p` 看在办的。")
         if self.cancel_job is None:
             if request.status not in intake_mod.OPEN:
                 return "**{}** 已经是 {}。".format(request.id, request.status)
@@ -718,12 +741,14 @@ class Brain:
         agent to work. The job goes through the same store and the same serial
         worker as a decomposition, so it has a log, a status and a reply.
         """
-        number = _first_int(rest)
+        token, number, remainder = parse_issue_ref(rest)
         if number is None:
-            return "用法：`/dev <issue 号> [仓库]`，例如 `/dev 612 demo-gh`"
-        _, remainder = _split_id(rest)
-        repo, _ = self._split_repo(re.sub(r"^\s*#?\d+\s*", "", rest or "", count=1))
-        entry = self.registry.get(repo) if repo else self.registry.default
+            return "用法：`/dev <issue-id>`，例如 `/dev 612` 或 `/dev demo-gh:612`"
+        if not token:
+            # The trailing form predates the qualified one and still works.
+            trailing, _ = self._split_repo(remainder)
+            token = trailing
+        entry = self.registry.get(token) if token else self.registry.default
         if entry is None:
             return "不知道该在哪个仓库开发 #{}。可用：{}".format(
                 number, "、".join(self.registry.names()) or "（一个都没配）")
@@ -758,16 +783,18 @@ class Brain:
         return None, text
 
     def _cmd_skip(self, rest, inbound):
-        number = _first_int(rest)
         pending_confirm, cleaned = needs_confirm(rest)
-        reason = re.sub(r"^\s*#?\d+\s*", "", cleaned, count=1).strip()
+        token, number, reason = parse_issue_ref(cleaned)
         if number is None:
-            return "用法：`/skip <issue 号> confirm <理由>`"
+            return "用法：`/skip <issue-id> confirm <理由>`，例如 `/skip demo-gh:612 confirm 已经修好了`"
+        repo, problem = self._resolve_issue_repo(token)
+        if problem:
+            return problem
         if pending_confirm:
             return "这会把 #{} 永久退出队列。确认请发：`/skip {} confirm {}`".format(number, number, reason)
         if len(reason) < 15:
             return "退掉一条 issue 要写清楚为什么不需要改代码（至少 15 个字）。"
-        forge = self.forge_for(self.default_repo)
+        forge = self.forge_for(repo)
         forge.add_issue_comment(number, state.stamp(
             "**Skipped — no code change needed.**\n\n{}\n\n"
             "_由 {} 在钉钉操作。移除标题前缀即可放回队列。_".format(reason, inbound.sender_nick)))
@@ -775,14 +802,17 @@ class Brain:
         return "已退掉 #{}。".format(number)
 
     def _cmd_requeue(self, rest, inbound):
-        number = _first_int(rest)
-        pending_confirm, _ = needs_confirm(rest)
+        pending_confirm, cleaned = needs_confirm(rest)
+        token, number, _ = parse_issue_ref(cleaned)
         if number is None:
-            return "用法：`/requeue <issue 号> confirm`"
+            return "用法：`/requeue <issue-id> confirm`，例如 `/requeue demo-gh:612 confirm`"
+        repo, problem = self._resolve_issue_repo(token)
+        if problem:
+            return problem
         if pending_confirm:
             return "这会清掉 #{} 的状态前缀，下一轮可能被重新认领。确认请发：`/requeue {} confirm`".format(
                 number, number)
-        forge = self.forge_for(self.default_repo)
+        forge = self.forge_for(repo)
         _set_state(forge, number, None)
         forge.add_issue_comment(number, state.stamp(
             "由 {} 在钉钉放回队列。".format(inbound.sender_nick)))
@@ -798,6 +828,32 @@ def _set_state(forge, number: int, target: Optional[str]) -> None:
     issue = forge.get_issue(number)
     _, base = state.split_state(issue.title)
     forge.set_issue_title(number, state.compose(target, base))
+
+
+#: `612`, `#612`, `demo-gh:612`, `org/name:612`. The slug may contain slashes, so
+#: the split is on the last colon.
+_ISSUE_REF_RE = re.compile(r"^\s*(?:(?P<repo>[\w.\-/]+):)?#?(?P<number>\d+)\s*(?P<rest>.*)$",
+                           re.DOTALL)
+#: A requirement id starts with R and a date. Reading its digits as an issue
+#: number would act on something entirely unrelated.
+_REQUEST_ID_RE = re.compile(r"^\s*R\d{8}-\d+")
+
+
+def parse_issue_ref(text):
+    """`(repo token or None, issue number or None, the rest)`.
+
+    A bare number means the default repository, which is what people type when
+    there is only one thing it could mean. The qualified form exists because
+    commands acting on an issue used to look *only* at the default, leaving
+    every other repository in a multi-repository setup unreachable by name.
+    """
+    text = (text or "").strip()
+    if not text or _REQUEST_ID_RE.match(text):
+        return None, None, text
+    m = _ISSUE_REF_RE.match(text)
+    if not m:
+        return None, None, text
+    return m.group("repo"), int(m.group("number")), m.group("rest").strip()
 
 
 def _split_id(text: str):

@@ -342,3 +342,48 @@ class DecoratedCommands(unittest.TestCase):
     def test_the_arrow_and_what_follows_do_not_corrupt_the_target(self):
         _, rest = listener.parse_command("`同意 R1 demo-gh` → `owner/name`")
         self.assertNotIn("→", rest.split(" ")[0])
+
+
+class IssueReferences(unittest.TestCase):
+    """`612` when it is obvious, `demo-gh:612` when it is not.
+
+    Commands that act on an issue used to look only at the default repository, so
+    with several registered there was no way to name an issue in any of the others.
+    """
+
+    def test_a_bare_number(self):
+        self.assertEqual(listener.parse_issue_ref("612"), (None, 612, ""))
+
+    def test_a_hash_is_tolerated(self):
+        self.assertEqual(listener.parse_issue_ref("#612"), (None, 612, ""))
+
+    def test_a_qualified_reference(self):
+        self.assertEqual(listener.parse_issue_ref("demo-gh:612"), ("demo-gh", 612, ""))
+
+    def test_a_full_project_path_qualifies_too(self):
+        # The slug may contain slashes, so the split is on the last colon.
+        self.assertEqual(listener.parse_issue_ref("org/name:612"), ("org/name", 612, ""))
+
+    def test_a_qualified_reference_with_a_hash(self):
+        self.assertEqual(listener.parse_issue_ref("demo-gh:#612"), ("demo-gh", 612, ""))
+
+    def test_the_rest_of_the_line_comes_back(self):
+        repo, number, rest = listener.parse_issue_ref("demo-gh:612 用第二个方案")
+        self.assertEqual((repo, number, rest), ("demo-gh", 612, "用第二个方案"))
+
+    def test_the_rest_survives_an_unqualified_reference(self):
+        self.assertEqual(listener.parse_issue_ref("612 用第二个方案"), (None, 612, "用第二个方案"))
+
+    def test_no_number_at_all(self):
+        self.assertEqual(listener.parse_issue_ref("nonsense"), (None, None, "nonsense"))
+
+    def test_empty(self):
+        self.assertEqual(listener.parse_issue_ref(""), (None, None, ""))
+
+    def test_a_requirement_id_is_not_an_issue_reference(self):
+        # R20260824-01 is a requirement; reading its digits as an issue number
+        # would act on a completely unrelated thing.
+        self.assertEqual(listener.parse_issue_ref("R20260824-01")[1], None)
+
+    def test_a_colon_with_no_number_is_not_a_reference(self):
+        self.assertEqual(listener.parse_issue_ref("demo-gh:")[1], None)
