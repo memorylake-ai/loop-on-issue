@@ -126,19 +126,22 @@ class Executor:
         # Derive the session before starting, so `claude --resume <id>` can get
         # into exactly what this agent saw. Without it a job that goes wrong is
         # only inspectable as a log, and only by guessing.
-        session = runner_mod.intake_session_id(request.id)
+        resuming = request.resuming
+        session = request.session or runner_mod.intake_session_id(request.id)
         request.start(session=session)
         self.store.save(request)
         log.info("running %s (%s) in %s session=%s",
                  request.id, request.kind, entry.path, session)
 
-        prompt = self._prompt(request, entry)
+        prompt = (self._retry_prompt(request) if resuming else self._prompt(request, entry))
         log_path = self.store.log_for(request.id)
         with open(log_path, "ab") as fh:
             fh.write("\n$ {}\n".format(request.kind).encode("utf-8"))
             try:
+                command = (runner_mod.resume_command("claude", session, prompt) if resuming
+                           else runner_mod.start_command("claude", session, prompt))
                 proc = subprocess.run(
-                    runner_mod.start_command("claude", session, prompt),
+                    command,
                     cwd=entry.path, stdout=fh, stderr=subprocess.STDOUT,
                     timeout=self.timeout,
                 )
@@ -189,6 +192,23 @@ class Executor:
             return []
         started = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(request.started_at - 60))
         return [i.url for i in issues if (i.created_at or "") >= started]
+
+    def _retry_prompt(self, request):
+        """Continue an attempt that did not finish, rather than starting over.
+
+        Deliberately short: the session already holds the requirement, whatever
+        reading it did, and whatever it drafted. Restating the brief invites it to
+        begin again and reach a different answer.
+        """
+        return (
+            "That attempt ended without producing anything, so this is a retry of the "
+            "same job in the same session.\n\n"
+            "Whatever blocked you before has been addressed: you can run `loop`, `git` "
+            "and `gh`.\n\n"
+            "Continue from where you stopped. Finish the job — actually create the "
+            "issues — and write the report to `{result}`. If you are still blocked, say "
+            "exactly what by, and stop rather than describing what you would have done."
+        ).format(result=self.store.result_for(request.id))
 
     def _prompt(self, request, entry):
         if request.kind == intake_mod.DEVELOP:

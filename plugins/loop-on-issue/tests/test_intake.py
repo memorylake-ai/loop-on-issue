@@ -297,3 +297,36 @@ class Sessions(unittest.TestCase):
 
         self.assertNotEqual(runner.intake_session_id("R1"),
                             runner.intake_session_id("R1", generation=1))
+
+
+class Retrying(unittest.TestCase):
+    """A derived session id can only be created once."""
+
+    def test_a_first_attempt_is_not_a_resume(self):
+        req = intake_mod.Request(id="R1", text="x")
+        req.approve(by="J", auto=True)
+        self.assertFalse(req.resuming)
+
+    def test_a_second_attempt_is(self):
+        # `claude -p --session-id X` refuses when X already exists, so a retry
+        # that starts afresh dies before doing anything.
+        req = intake_mod.Request(id="R1", text="x")
+        req.approve(by="J", auto=True)
+        req.start(session="derived")
+        req.fail("blocked")
+        self.assertTrue(req.resuming)
+
+    def test_attempts_are_counted(self):
+        req = intake_mod.Request(id="R1", text="x")
+        req.approve(by="J", auto=True)
+        req.start(session="s")
+        req.fail("x")
+        req.status = intake_mod.APPROVED
+        req.start(session="s")
+        self.assertEqual(req.attempts, 2)
+
+    def test_an_attempt_without_a_session_cannot_resume(self):
+        req = intake_mod.Request(id="R1", text="x")
+        req.approve(by="J", auto=True)
+        req.start()
+        self.assertFalse(req.resuming)

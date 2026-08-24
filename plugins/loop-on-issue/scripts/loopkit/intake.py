@@ -72,6 +72,10 @@ class Request:
     #: The `claude --resume` id for the agent that ran this, derived from the
     #: request id so it can be recomputed rather than remembered.
     session: str = ""
+    #: How many times it has been started. A derived id can only be *created*
+    #: once — a second start collides with the session the first one left behind
+    #: — so anything past the first has to resume instead.
+    attempts: int = 0
     session: str = ""
 
     # -- transitions ---------------------------------------------------------
@@ -107,9 +111,20 @@ class Request:
     def start(self, session: str = "") -> "Request":
         self.status = RUNNING
         self.started_at = time.time()
+        self.attempts += 1
         if session:
             self.session = session
         return self
+
+    @property
+    def resuming(self) -> bool:
+        """Has this already been attempted, so the session exists to continue?
+
+        Resuming rather than restarting is not only about the id collision: the
+        earlier attempt did the reading. Throwing that away makes a retry pay for
+        recon twice and invites it to reach a different conclusion.
+        """
+        return self.attempts > 0 and bool(self.session)
 
     def finish(self, issues: Optional[List[str]] = None) -> "Request":
         """Record a job that actually produced something.
