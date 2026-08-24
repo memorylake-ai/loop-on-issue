@@ -466,6 +466,128 @@ def cmd_ask(args):
     return 0 if result.answered else PRECONDITION
 
 
+#: Default seconds the interactive hook waits before letting the issue pause.
+#: Short on purpose: someone may be looking at their phone right now, and if they
+#: are not, the durable channel is already holding the question.
+HOOK_WAIT_DEFAULT = 120
+
+#: A hard ceiling on the hook's wait. A blocked session holds a slot and keeps the
+#: machine warm; past a few minutes the durable channel is strictly better.
+HOOK_WAIT_MAX = 900
+
+_HOOK_ANSWERED = (
+    "AskUserQuestion cannot be answered in an unattended session, so the question "
+    "was relayed to issue #{id} (and to chat if configured).\n\n"
+    "A human answered:\n\n{answer}\n\n"
+    "Continue from that answer. Do not call AskUserQuestion again for it."
+)
+
+_HOOK_UNANSWERED = (
+    "AskUserQuestion cannot be answered in an unattended session. The question is "
+    "now recorded on issue #{id} ({url}) and nobody has answered yet.\n\n"
+    "Do not retry and do not guess. Transition the issue to PAUSED and end the "
+    "session — the next scheduled run picks up the answer and resumes this same "
+    "session with its context intact."
+)
+
+_HOOK_BROKEN = (
+    "AskUserQuestion cannot be answered in an unattended session, and relaying the "
+    "question failed: {error}\n\n"
+    "Do not guess. Report the blocker, leave the issue at its current state, and "
+    "end the session so a human can look."
+)
+
+
+def cmd_hook(args):
+    """Adapter for a Claude Code PreToolUse hook on AskUserQuestion.
+
+    Note the exit codes here answer to a *different* contract than the rest of
+    this CLI: Claude Code reads **2** as "block this tool call" and feeds stderr
+    back to the model as the reason. There is no mechanism for a hook to supply a
+    synthetic tool result, so a human's answer has to travel as that reason.
+
+    Exit 0 means "let the tool through", which is what happens outside a loop
+    session — a developer's own interactive session must be untouched.
+    """
+    issue_id = (os.environ.get("LOOP_ISSUE") or "").strip()
+    if not issue_id.isdigit():
+        return 0
+
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+        questions = ((payload.get("tool_input") or {}).get("questions")) or []
+    except (ValueError, AttributeError):
+        # A payload shape we do not understand is not a reason to break a session.
+        return 0
+    if not questions:
+        return 0
+
+    text, options = _render_questions(questions)
+    wait = hook_wait()
+
+    try:
+        ctx = Ctx(args)
+        result = ask_mod.ask(
+            ctx.forge, ctx.repo.path, int(issue_id), text,
+            options=options, wait=wait, notify=notifier(), index=pending_index(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(_HOOK_BROKEN.format(error=exc), file=sys.stderr)
+        return 2
+
+    if result.answered:
+        answer = result.answer
+        rendered = "\n".join("- {}".format(c) for c in answer.choices) if answer.choices else answer.raw
+        if answer.by:
+            rendered += "\n\n(answered by {})".format(answer.by)
+        print(_HOOK_ANSWERED.format(id=issue_id, answer=rendered), file=sys.stderr)
+        return 2
+
+    print(_HOOK_UNANSWERED.format(id=issue_id, url=result.url), file=sys.stderr)
+    return 2
+
+
+def hook_wait():
+    """Seconds the hook waits, from the environment, never unbounded.
+
+    A malformed value falls back rather than raising: a typo in a routine's env
+    must not take out every session it starts.
+    """
+    raw = (os.environ.get("LOOP_ASK_WAIT") or "").strip()
+    try:
+        value = int(raw) if raw else HOOK_WAIT_DEFAULT
+    except ValueError:
+        return HOOK_WAIT_DEFAULT
+    return max(0, min(value, HOOK_WAIT_MAX))
+
+
+def _render_questions(questions):
+    """Flatten AskUserQuestion's input into one question, plus options if unambiguous.
+
+    Options are only offered when there is exactly one question. Numbering them
+    across several would be ambiguous — "2" could mean either question's second
+    option — and a wrong reading here silently redirects the work.
+    """
+    if len(questions) == 1:
+        q = questions[0]
+        options = []
+        for option in q.get("options") or []:
+            label = option.get("label") if isinstance(option, dict) else str(option)
+            description = option.get("description") if isinstance(option, dict) else ""
+            options.append("{} — {}".format(label, description) if description else label)
+        return (q.get("question") or "").strip(), options
+
+    blocks = []
+    for index, q in enumerate(questions, 1):
+        block = ["{}. {}".format(index, (q.get("question") or "").strip())]
+        for option in q.get("options") or []:
+            label = option.get("label") if isinstance(option, dict) else str(option)
+            description = option.get("description") if isinstance(option, dict) else ""
+            block.append("   - {}{}".format(label, " — {}".format(description) if description else ""))
+        blocks.append("\n".join(block))
+    return "\n\n".join(blocks), []
+
+
 def cmd_report(args):
     """Write a run's outcome to both surfaces.
 
@@ -778,6 +900,10 @@ def build_parser():
     sp.add_argument("--dry-run", action="store_true")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_report)
+
+    sp = sub.add_parser("hook", help="adapters invoked by the host runtime's hooks")
+    sp.add_argument("event", choices=("ask-user-question",))
+    sp.set_defaults(func=cmd_hook)
 
     sp = sub.add_parser("dingtalk", help="chat channel status and housekeeping")
     sp.add_argument("action", nargs="?", default="status", choices=("status", "sweep"))

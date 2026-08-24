@@ -140,6 +140,31 @@ class Commands(unittest.TestCase):
             self.assertTrue(named, "{} names no known skill".format(path))
 
 
+class Hooks(unittest.TestCase):
+    def test_the_hook_manifest_is_valid_and_targets_the_cli(self):
+        data = read_json(PLUGIN, "hooks", "hooks.json")
+        entries = data["hooks"]["PreToolUse"]
+        self.assertTrue(entries)
+        command = entries[0]["hooks"][0]["command"]
+        self.assertIn("CLAUDE_PLUGIN_ROOT", command)
+        self.assertIn("hook ask-user-question", command)
+
+    def test_it_matches_the_tool_it_means_to_intercept(self):
+        data = read_json(PLUGIN, "hooks", "hooks.json")
+        self.assertEqual(data["hooks"]["PreToolUse"][0]["matcher"], "AskUserQuestion")
+
+    def test_the_hook_timeout_outlasts_the_wait_it_permits(self):
+        # A hook killed mid-wait leaves the tool call unresolved and the session
+        # in a state nothing reports on.
+        import sys as _sys
+
+        _sys.path.insert(0, os.path.join(PLUGIN, "scripts"))
+        import loop_cli
+
+        timeout = read_json(PLUGIN, "hooks", "hooks.json")["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"]
+        self.assertGreater(timeout, loop_cli.HOOK_WAIT_DEFAULT)
+
+
 class Assets(unittest.TestCase):
     def test_bundled_templates_exist_for_every_language_and_kind(self):
         for lang in ("en", "zh"):
