@@ -610,6 +610,9 @@ class Brain:
         (intake_mod.PENDING, "待审批"),
         (intake_mod.APPROVED, "已批准，排队等执行"),
         (intake_mod.RUNNING, "正在执行"),
+        # Shown, not swallowed: during an outage a queue full of deferred work
+        # would otherwise look exactly like an idle one.
+        (intake_mod.WAITING, "服务端故障，等待重试"),
     )
 
     def _cmd_p(self, rest, inbound):
@@ -622,8 +625,9 @@ class Brain:
             total += len(rows)
             blocks.append("**{}（{}）**".format(label, len(rows)))
             blocks.append(bullets(*[
-                "**{}** · `{}` · {} 提 — {}".format(
-                    r.id, r.repo, r.requester or "?", _one_line(r.text, 60))
+                "**{}** · `{}` · {} 提 — {}{}".format(
+                    r.id, r.repo, r.requester or "?", _one_line(r.text, 60),
+                    _retry_note(r) if status == intake_mod.WAITING else "")
                 for r in rows[:10]
             ]))
         if not total:
@@ -655,8 +659,11 @@ class Brain:
             facts.append("审批备注：{}".format(request.approval_note))
         if request.rejected_reason:
             facts.append("驳回理由：{}".format(request.rejected_reason))
+        if request.transient_failures:
+            facts.append("服务端故障：{} 次".format(request.transient_failures))
         if request.error:
-            facts.append("失败：{}".format(request.error))
+            facts.append("{}：{}".format(
+                "等待重试" if request.status == intake_mod.WAITING else "失败", request.error))
         return md(
             "**{}** · {} · `{}`".format(request.id, request.status, request.repo),
             "> {}".format(_one_line(request.text, 200)),
@@ -864,6 +871,14 @@ def _split_id(text: str):
         return m.group(1), m.group(2).strip()
     head, _, tail = text.partition(" ")
     return (head, tail.strip()) if head else (None, "")
+
+
+def _retry_note(request) -> str:
+    import time as _time
+
+    seconds = max(0, int(request.retry_at - _time.time()))
+    return "（第 {} 次故障，约 {} 秒后重试）".format(
+        request.transient_failures, seconds) if seconds else "（马上重试）"
 
 
 def _one_line(text: str, limit: int = 80) -> str:

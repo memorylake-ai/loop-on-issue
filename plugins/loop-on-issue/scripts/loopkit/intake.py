@@ -33,9 +33,12 @@ REJECTED = "rejected"
 FAILED = "failed"
 EXPIRED = "expired"
 CANCELLED = "cancelled"
+#: Hit a transport fault and is waiting out a backoff. Still somebody's work —
+#: it just has nothing to do this minute.
+WAITING = "waiting"
 
 #: States that still hold a claim on somebody's attention.
-OPEN = (PENDING, APPROVED, RUNNING)
+OPEN = (PENDING, APPROVED, WAITING, RUNNING)
 
 #: What an approved request makes an agent do. Both are "run one `claude -p` in a
 #: checkout and report what came of it", which is why they share this store, its
@@ -81,6 +84,12 @@ class Request:
     #: making progress can actually be stopped — a status field alone lets you
     #: relabel a stuck job without freeing the worker it is holding.
     pid: int = 0
+    #: When a deferred job becomes runnable again, and how many transport faults
+    #: it has survived. Counted separately from `attempts`, because a retry after
+    #: an outage is not the same kind of event as a retry after a real failure and
+    #: should not spend the same budget.
+    retry_at: float = 0.0
+    transient_failures: int = 0
     #: Questions the agent put to a human while working, with their answers.
     #: A decomposition has no issue to hold them, and it is the job that most
     #: needs to ask: most ambiguity, least to check a reading against.
@@ -125,6 +134,22 @@ class Request:
         if session:
             self.session = session
         return self
+
+    def defer(self, reason: str, seconds: int) -> "Request":
+        """Stand down for a while after a transport fault.
+
+        Status, not silence: `/p` shows it as waiting, so a queue that looks idle
+        during an outage can be told apart from one that is idle.
+        """
+        self.status = WAITING
+        self.transient_failures += 1
+        self.retry_at = time.time() + seconds
+        self.error = reason
+        self.pid = 0
+        return self
+
+    def due(self, now: Optional[float] = None) -> bool:
+        return self.status == WAITING and (now if now is not None else time.time()) >= self.retry_at
 
     def cancel(self, by: str = "") -> "Request":
         self.status = CANCELLED
@@ -259,6 +284,10 @@ class Store:
     def by_status(self, *statuses: str) -> List[Request]:
         wanted = set(statuses)
         return [r for r in self.all() if r.status in wanted]
+
+    def due(self, now: Optional[float] = None) -> List[Request]:
+        """Deferred jobs whose backoff has elapsed."""
+        return [r for r in self.by_status(WAITING) if r.due(now)]
 
     def expire_stale(self, ttl: int, now: Optional[float] = None) -> List[Request]:
         """Retire requests nobody ever decided on.

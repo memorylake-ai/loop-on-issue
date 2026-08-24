@@ -83,6 +83,10 @@ DEFAULTS: Dict[str, Any] = {
     # How long one such job may run before it is stopped. Short enough that a job
     # which has stopped making progress does not hold a slot all afternoon.
     "job_timeout": 1800,
+    # How many times a job may be retried after a *transport* fault — an
+    # overloaded API, a dropped connection. Real failures are never retried: they
+    # would fail identically and only postpone somebody looking. Zero disables it.
+    "max_retries": 3,
 }
 
 _ENUMS = {
@@ -92,7 +96,7 @@ _ENUMS = {
 }
 
 _POSITIVE_INTS = ("max_parallel", "session_timeout", "max_parallel_jobs", "job_timeout")
-_NON_NEGATIVE_INTS = ("ask_wait", "intake_ttl")
+_NON_NEGATIVE_INTS = ("ask_wait", "intake_ttl", "max_retries")
 _LISTS = ("env_files",)
 _STRINGS = (
     "queue_label",

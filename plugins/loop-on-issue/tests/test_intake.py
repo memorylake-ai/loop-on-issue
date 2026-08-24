@@ -432,3 +432,54 @@ class Cancelling(unittest.TestCase):
         self.assertGreaterEqual(req.running_for, 0.0)
         req.cancel()
         self.assertEqual(req.running_for, 0.0)
+
+
+class Deferring(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="loop-intake-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.store = intake_mod.Store(self.dir)
+
+    def _deferred(self, seconds=60):
+        req = intake_mod.Request(id="R1", text="x")
+        req.approve(by="J", auto=True)
+        req.start(session="s", pid=1)
+        req.defer("API Error: 529 Overloaded", seconds)
+        return self.store.save(req)
+
+    def test_a_deferred_job_is_waiting_not_failed(self):
+        # An outage is not the same news as a broken requirement, and the board
+        # should not report it as one.
+        self.assertEqual(self._deferred().status, intake_mod.WAITING)
+
+    def test_it_is_still_open_work(self):
+        self._deferred()
+        self.assertEqual([r.id for r in self.store.by_status(*intake_mod.OPEN)], ["R1"])
+
+    def test_it_counts_transport_faults_separately_from_attempts(self):
+        # A retry after an outage is not the same event as a retry after a real
+        # failure, and must not spend the same budget.
+        req = self._deferred()
+        self.assertEqual((req.attempts, req.transient_failures), (1, 1))
+
+    def test_it_is_not_due_before_its_time(self):
+        req = self._deferred(seconds=3600)
+        self.assertFalse(req.due())
+        self.assertEqual(self.store.due(), [])
+
+    def test_it_becomes_due(self):
+        self._deferred(seconds=0)
+        self.assertEqual([r.id for r in self.store.due()], ["R1"])
+
+    def test_the_process_is_forgotten(self):
+        self.assertEqual(self._deferred().pid, 0)
+
+    def test_the_reason_is_kept_so_a_human_can_see_what_happened(self):
+        self.assertIn("529", self._deferred().error)
+
+    def test_something_running_is_never_due(self):
+        req = intake_mod.Request(id="R2", text="x")
+        req.approve(by="J", auto=True)
+        req.start(session="s")
+        self.store.save(req)
+        self.assertEqual(self.store.due(), [])

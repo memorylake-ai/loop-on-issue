@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 
 from loopkit import config as cfg  # noqa: E402
 from loopkit import dingtalk as dt_mod  # noqa: E402
+from loopkit import failures as failures_mod  # noqa: E402
 from loopkit import intake as intake_mod  # noqa: E402
 from loopkit import listener as listener_mod  # noqa: E402
 from loopkit import pending, remotes  # noqa: E402
@@ -100,7 +101,7 @@ class Executor:
     more, however its record reads.
     """
 
-    def __init__(self, store, registry, notify, timeout=1800, workers=2):
+    def __init__(self, store, registry, notify, timeout=1800, workers=2, max_retries=3):
         import threading
 
         self.store = store
@@ -108,6 +109,7 @@ class Executor:
         self.notify = notify
         self.timeout = timeout
         self.workers = max(1, workers)
+        self.max_retries = max(0, max_retries)
         self.queue = __import__("queue").Queue()
         self._threads = []
         self._repo_locks = {}
@@ -126,6 +128,7 @@ class Executor:
         import threading
 
         self._recover()
+        threading.Thread(target=self._waker, daemon=True, name="loop-waker").start()
         for index in range(self.workers):
             thread = threading.Thread(target=self._worker, daemon=True,
                                       name="loop-worker-{}".format(index + 1))
@@ -133,6 +136,27 @@ class Executor:
             self._threads.append(thread)
         log.info("executor started with %d worker(s), %ds timeout",
                  self.workers, self.timeout)
+
+    def _waker(self):
+        """Put deferred jobs back when their backoff elapses.
+
+        A separate thread rather than a sleeping worker: a worker asleep on a
+        backoff is a slot nobody else can use, and an outage tends to defer
+        several jobs at once.
+        """
+        import time as _time
+
+        while True:
+            try:
+                for request in self.store.due():
+                    log.info("%s backoff elapsed, retrying (transport fault #%d)",
+                             request.id, request.transient_failures)
+                    request.status = intake_mod.APPROVED
+                    self.store.save(request)
+                    self.queue.put(request.id)
+            except Exception:  # noqa: BLE001 - never let the waker die
+                log.exception("waker failed")
+            _time.sleep(15)
 
     def _recover(self):
         """Requeue work that was approved or interrupted.
@@ -142,7 +166,11 @@ class Executor:
         running now. Re-queueing is right, and leaving it labelled `running`
         would make it invisible to every later recovery.
         """
-        for request in self.store.by_status(intake_mod.APPROVED, intake_mod.RUNNING):
+        for request in self.store.by_status(intake_mod.APPROVED, intake_mod.RUNNING,
+                                            intake_mod.WAITING):
+            if request.status == intake_mod.WAITING and not request.due():
+                # Its backoff outlived the listener; the waker will get it.
+                continue
             if request.status == intake_mod.RUNNING:
                 if _alive(request.pid):
                     log.warning("%s is still running as pid %s elsewhere; leaving it",
@@ -181,7 +209,8 @@ class Executor:
 
     def _run(self, request_id):
         request = self.store.get(request_id)
-        if not request or request.status not in (intake_mod.APPROVED, intake_mod.RUNNING):
+        if not request or request.status not in (intake_mod.APPROVED, intake_mod.RUNNING,
+                                                 intake_mod.WAITING):
             return
 
         lock = self._repo_lock(request.repo)
@@ -279,10 +308,25 @@ class Executor:
         issues = self._issues_filed(request, entry) or _issue_urls(result)
 
         if intake_mod.produced_nothing(request.kind, issues, result):
-            request.fail(
+            # Ask what kind of nothing. A busy API and an agent that thought and
+            # built nothing look identical from here, and want opposite responses.
+            tail = _read_tail(log_path)
+            kind = failures_mod.classify(tail, code)
+            if failures_mod.should_retry(kind, request.transient_failures, self.max_retries):
+                delay = failures_mod.backoff(request.transient_failures + 1)
+                request.defer(_first_fault_line(tail) or "transport fault", delay)
+                self.store.save(request)
+                log.info("%s deferred %ds after a transport fault", request.id, delay)
+                return
+            reason = (
+                "gave up after {} transport fault(s); the last was: {}".format(
+                    request.transient_failures, _first_fault_line(tail))
+                if request.transient_failures else
                 "agent exited {} but produced nothing — no issues on the board and "
                 "no report. Inspect with `claude --resume {}`, or read {}".format(
-                    code, request.session, log_path))
+                    code, request.session, log_path)
+            )
+            request.fail(reason)
             self.store.save(request)
             self._release_issue(request, entry)
             self.notify(self._failure_text(request))
@@ -462,6 +506,21 @@ def _kill(pid):
     return not _alive(pid)
 
 
+def _read_tail(path, lines=60):
+    text = _read_text(path)
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def _first_fault_line(tail):
+    """The line that actually says what went wrong, for a human to read."""
+    import re as _re
+
+    for line in reversed((tail or "").splitlines()):
+        if _re.search(r"error|overloaded|ECONN|ETIMEDOUT|rate.?limit", line, _re.IGNORECASE):
+            return line.strip()[:160]
+    return ""
+
+
 def _read_text(path):
     try:
         with open(path) as fh:
@@ -552,7 +611,8 @@ def run(env, repo_root):
 
     brain, registry, store, conf = make_brain(env, repo_root)
     executor = Executor(store, registry, announce,
-                        timeout=conf.job_timeout, workers=conf.max_parallel_jobs)
+                        timeout=conf.job_timeout, workers=conf.max_parallel_jobs,
+                        max_retries=conf.max_retries)
     brain.cancel_job = executor.cancel
     brain.enqueue = executor.submit
     executor.start()

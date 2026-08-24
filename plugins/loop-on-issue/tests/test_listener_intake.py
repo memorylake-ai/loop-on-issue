@@ -492,3 +492,39 @@ class Cancelling(Base):
         request = self._running()
         self.brain.handle(msg(text="/cancel " + request.id, msg_id="m2", sender=self.APPROVER))
         self.assertIn("没有在办", self.brain.handle(msg(text="/p", msg_id="m3")))
+
+
+class DeferredWorkIsVisible(Base):
+    """During an outage, a queue full of waiting work must not look idle."""
+
+    def _deferred(self):
+        self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
+        request = self.store.all()[0]
+        self.brain.handle(msg(text="同意 " + request.id, msg_id="ok", sender=self.APPROVER))
+        request = self.store.get(request.id)
+        request.start(session="s")
+        request.defer("API Error: 529 Overloaded", 300)
+        return self.store.save(request)
+
+    def test_p_shows_it_as_waiting_on_the_server(self):
+        request = self._deferred()
+        reply = self.brain.handle(msg(text="/p", msg_id="m2"))
+        self.assertIn(request.id, reply)
+        self.assertIn("服务端故障", reply)
+
+    def test_it_says_how_long(self):
+        self._deferred()
+        self.assertIn("秒后重试", self.brain.handle(msg(text="/p", msg_id="m2")))
+
+    def test_r_distinguishes_waiting_from_failed(self):
+        request = self._deferred()
+        reply = self.brain.handle(msg(text="/r " + request.id, msg_id="m2"))
+        self.assertIn("等待重试", reply)
+        self.assertNotIn("失败：", reply)
+
+    def test_it_can_still_be_cancelled(self):
+        # An outage nobody wants to wait out is still somebody's decision.
+        request = self._deferred()
+        self.brain.cancel_job = lambda rid, by: (True, "已停掉 " + rid)
+        self.assertIn("已停掉", self.brain.handle(
+            msg(text="/cancel " + request.id, msg_id="m2", sender=self.APPROVER)))
