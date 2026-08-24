@@ -83,6 +83,17 @@ def load_env(paths: Optional[List[str]] = None, environ: Optional[Dict[str, str]
     return result
 
 
+def dm_users(env: Dict[str, str]) -> List[str]:
+    """staffIds to send a card to one-to-one.
+
+    A group conversation and a private chat need different endpoints, and their
+    ids look alike, so which one to use cannot be inferred — it is configured.
+    Set this for a bot used in a private chat; leave it empty for a group.
+    """
+    raw = (env.get("LOOP_DINGTALK_DM_USERS") or "").strip()
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def conversations(env: Dict[str, str]) -> List[str]:
     """The allow-listed group conversations.
 
@@ -196,6 +207,12 @@ class DingTalk:
         half of a dual write vanish unnoticed.
         """
         if self.configured:
+            # A private chat first, when one is configured: a card sent to a group
+            # endpoint with a one-to-one conversation id is silently accepted and
+            # never delivered.
+            users = dm_users(self.env)
+            if users and not conversation_id:
+                return self.send_dm(users[0], title, text) or ""
             target = conversation_id or (conversations(self.env)[:1] or [None])[0]
             if target:
                 return self.send_group(target, title, text) or ""

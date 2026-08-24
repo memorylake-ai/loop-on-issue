@@ -142,17 +142,21 @@ def ask(
         if pqk:
             idx.record(pqk, {"repo": repo, "issue": number, "options": options, "url": url})
 
+    answered = False
     try:
         result = _poll(forge, number, options, anchor, wait, poll, clock, sleep)
+        answered = result.answered
         result.url = url
         result.pqk = pqk
         result.notify_error = notify_error
         return result
     finally:
-        # The index entry only exists to route an answer back to a question that
-        # is still being waited on. Leaving it behind makes a later bare reply
-        # answer something nobody is listening to.
-        if pqk:
+        # Only an *answered* question stops needing its routing entry. An
+        # unanswered one has to outlive this process: `wait=0` is the normal case,
+        # where the whole point is that a human answers minutes or hours later and
+        # their quote-reply still has to find its way back to this issue. The TTL
+        # sweep collects whatever is never answered.
+        if pqk and answered:
             idx.remove(pqk)
 
 

@@ -139,15 +139,19 @@ def run(env, repo_root):
 
     if not brain.conversations:
         print("No conversations are allow-listed, so every message will be ignored.\n"
-              "Send `@bot /ping` once, take the conversationId from the log, and put "
-              "it in LOOP_DINGTALK_CONVERSATIONS.", file=sys.stderr)
+              "Send `@bot /whoami` in the group — it is the one command an unlisted "
+              "conversation may run — and paste what it replies into "
+              "LOOP_DINGTALK_CONVERSATIONS.", file=sys.stderr)
 
     class Handler(__import__("dingtalk_stream").ChatbotHandler):
         async def process(self, callback):
             data = callback.data or {}
             inbound = inbound_from(data)
-            log.info("inbound conversation=%s sender=%s pqk=%s text=%r",
-                     inbound.conversation_id, inbound.sender_nick,
+            # staffId is logged because it is the value needed to configure the
+            # approver, and the only place it is otherwise visible is a /whoami
+            # reply the sender has to think to ask for.
+            log.info("inbound conversation=%s sender=%s(%s) pqk=%s text=%r",
+                     inbound.conversation_id, inbound.sender_nick, inbound.sender_id,
                      (inbound.pqk or "")[:12], inbound.text[:120])
             # At-least-once delivery: a reconnect redelivers the same id, and
             # acting twice on a bare reply answers the wrong question.
@@ -171,6 +175,29 @@ def run(env, repo_root):
              repo.path, brain.conversations or "(none)",
              brain.approver_nick, conf.creator_mode)
     client.start_forever()
+    return 0
+
+
+def simulate(env, repo_root, text, sender="sim-user", nick="模拟用户", conversation=None) -> int:
+    """Run one message through the real pipeline without a group.
+
+    Everything except the DingTalk transport is exercised: dispatch, permissions,
+    the forge. Useful for checking a deployment before anyone is watching, and for
+    reproducing a misbehaving message afterwards.
+
+    It is not a dry run — a command that writes to the board writes to it.
+    """
+    brain, _, _ = build_brain(env, repo_root)
+    conversations = dt_mod.conversations(env)
+    inbound = listener_mod.Inbound(
+        msg_id="sim-{}".format(int(time.time() * 1000)),
+        text=text,
+        sender_id=sender,
+        sender_nick=nick,
+        conversation_id=conversation or (conversations[0] if conversations else "sim-conversation"),
+    )
+    answer = brain.handle(inbound)
+    print(answer or "(ignored — the conversation is not allow-listed)")
     return 0
 
 
@@ -213,6 +240,11 @@ def selftest(env, repo_root) -> int:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--simulate", metavar="TEXT",
+                        help="run one message through the real pipeline, no group needed")
+    parser.add_argument("--as", dest="sender", default="sim-user", help="sender staffId to simulate")
+    parser.add_argument("--nick", default="模拟用户")
+    parser.add_argument("--conversation", help="conversationId to simulate")
     parser.add_argument("--repo-root", default=os.getcwd())
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -225,6 +257,8 @@ def main(argv=None):
     root = os.path.abspath(args.repo_root)
     if args.selftest:
         return selftest(env, root)
+    if args.simulate:
+        return simulate(env, root, args.simulate, args.sender, args.nick, args.conversation)
     return run(env, root)
 
 

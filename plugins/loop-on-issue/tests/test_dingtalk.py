@@ -155,6 +155,32 @@ class Transport(unittest.TestCase):
         )
         self.assertEqual(dt.send("t", "b"), "K")
 
+    def test_a_configured_dm_user_wins_over_a_conversation(self):
+        # A private chat and a group need different endpoints, and a card sent to
+        # the group endpoint with a one-to-one id is accepted and never delivered.
+        calls = []
+
+        def http(url, payload, headers, method="POST"):
+            calls.append(url)
+            return ({"accessToken": "T", "expireIn": 100} if "accessToken" in url
+                    else {"processQueryKey": "K"})
+
+        dt = dingtalk.DingTalk(
+            {"DINGTALK_CLIENT_ID": "c", "DINGTALK_CLIENT_SECRET": "s",
+             "LOOP_DINGTALK_CONVERSATIONS": "cid-7", "LOOP_DINGTALK_DM_USERS": "staff-1"},
+            http=http,
+        )
+        self.assertEqual(dt.send("t", "b"), "K")
+        self.assertTrue(any("oToMessages" in u for u in calls))
+        self.assertFalse(any("groupMessages" in u for u in calls))
+
+    def test_dm_users_are_split(self):
+        env = dingtalk.load_env([], environ={"LOOP_DINGTALK_DM_USERS": "a, b"})
+        self.assertEqual(dingtalk.dm_users(env), ["a", "b"])
+
+    def test_no_dm_users_by_default(self):
+        self.assertEqual(dingtalk.dm_users({}), [])
+
     def test_direct_message_uses_the_one_to_one_endpoint(self):
         self.dt.send_dm("staff-1", "t", "b")
         self.assertTrue(any("oToMessages" in c["url"] for c in self.calls))

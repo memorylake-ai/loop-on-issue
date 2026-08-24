@@ -206,9 +206,17 @@ class Asking(unittest.TestCase):
         self._ask(wait=30, notify=lambda t, x: "PQK-9")
         self.assertIsNone(self.index.lookup("PQK-9"))
 
-    def test_the_index_entry_is_removed_even_when_nobody_answers(self):
+    def test_an_unanswered_question_keeps_its_routing_entry(self):
+        # The normal case is wait=0: ask, return, and let a human answer later.
+        # Dropping the entry on the way out would leave their quote-reply with
+        # nothing to route to — which is exactly what happened the first time this
+        # was pointed at a real DingTalk account.
         self._ask(wait=0, notify=lambda t, x: "PQK-9")
-        self.assertIsNone(self.index.lookup("PQK-9"))
+        self.assertEqual(self.index.lookup("PQK-9")["issue"], 612)
+
+    def test_an_unanswered_entry_is_eventually_swept(self):
+        self._ask(wait=0, notify=lambda t, x: "PQK-9")
+        self.assertEqual(self.index.sweep(ttl=0, now=1e12), 1)
 
     def test_a_broken_notifier_does_not_lose_the_question(self):
         # The issue comment is the durable channel; a DingTalk outage must not
