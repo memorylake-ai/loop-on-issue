@@ -42,6 +42,12 @@ DEFAULTS: Dict[str, Any] = {
     # Which agent runs a session. "claude" derives its resumable session id from
     # the issue; "codex" has to record one after the fact.
     "runner": "claude",
+    # Which model a spawned session uses. Null leaves it to the runner's own
+    # default. Worth setting when the default tier is under load: a 529 costs the
+    # whole job, and the evidence check correctly records that as a failure
+    # rather than quietly reporting success — but a failure is still a failure.
+    # Overridden per invocation by LOOP_AGENT_MODEL.
+    "agent_model": None,
     # Concurrent issues. Each slot is a full session running builds, so more
     # mostly buys swap thrash on a laptop.
     "max_parallel": 2,

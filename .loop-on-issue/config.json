@@ -17,5 +17,6 @@
   ],
   "escalation_command": null,
   "ask_wait": 0,
-  "intake_ttl": 604800
+  "intake_ttl": 604800,
+  "agent_model": "sonnet"
 }

@@ -138,8 +138,10 @@ class Executor:
         with open(log_path, "ab") as fh:
             fh.write("\n$ {}\n".format(request.kind).encode("utf-8"))
             try:
-                command = (runner_mod.resume_command("claude", session, prompt) if resuming
-                           else runner_mod.start_command("claude", session, prompt))
+                model = cfg.load(entry.path).agent_model
+                command = (runner_mod.resume_command("claude", session, prompt, model=model)
+                           if resuming
+                           else runner_mod.start_command("claude", session, prompt, model=model))
                 # LOOP_INTAKE is what lets the AskUserQuestion hook reach a
                 # human from a job that has no issue yet. Without it the hook
                 # steps aside and the tool runs in a headless session where

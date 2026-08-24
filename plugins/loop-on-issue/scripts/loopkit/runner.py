@@ -151,12 +151,25 @@ def select(
 # --------------------------------------------------------------------------- #
 
 
+def model_flags(model: Optional[str]) -> List[str]:
+    """`--model` when one is chosen, nothing when it is not.
+
+    Read from the environment first so a machine under load can be moved to a
+    different tier without editing every repository's config.
+    """
+    import os
+
+    chosen = (os.environ.get("LOOP_AGENT_MODEL") or model or "").strip()
+    return ["--model", chosen] if chosen else []
+
+
 def start_command(
     name: str,
     session: Optional[str],
     prompt: str,
     permission_mode: str = PERMISSION_MODE,
     sandbox: str = "workspace-write",
+    model: Optional[str] = None,
 ) -> List[str]:
     """The command that begins an issue's session.
 
@@ -165,7 +178,7 @@ def start_command(
     """
     if name == CLAUDE:
         cmd = ["claude", "-p", "--permission-mode", permission_mode]
-        cmd += list(STRICT_MCP)
+        cmd += list(STRICT_MCP) + model_flags(model)
         if session:
             cmd += ["--session-id", session]
         cmd.append(prompt)
@@ -177,8 +190,7 @@ def start_command(
             "codex", "exec", "--json",
             "--sandbox", sandbox,
             "-c", "approval_policy=\"never\"",
-            prompt,
-        ]
+        ] + model_flags(model) + [prompt]
     raise ValueError("unknown runner {!r}".format(name))
 
 
@@ -188,6 +200,7 @@ def resume_command(
     prompt: str,
     permission_mode: str = PERMISSION_MODE,
     sandbox: str = "workspace-write",
+    model: Optional[str] = None,
 ) -> List[str]:
     """The command that continues an existing session.
 
@@ -198,15 +211,14 @@ def resume_command(
         raise ValueError("cannot resume without a session id")
     if name == CLAUDE:
         return (["claude", "-p", "--permission-mode", permission_mode]
-                + list(STRICT_MCP) + ["--resume", session, prompt])
+                + list(STRICT_MCP) + model_flags(model) + ["--resume", session, prompt])
     if name == CODEX:
-        return [
+        return ([
             "codex", "exec", "resume", session,
             "--json",
             "--sandbox", sandbox,
             "-c", "approval_policy=\"never\"",
-            prompt,
-        ]
+        ] + model_flags(model) + [prompt])
     raise ValueError("unknown runner {!r}".format(name))
 
 

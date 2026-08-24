@@ -167,3 +167,49 @@ class MCPIsolation(unittest.TestCase):
     def test_the_session_id_is_still_pinned(self):
         cmd = runner.start_command("claude", "SID", "b")
         self.assertEqual(cmd[cmd.index("--session-id") + 1], "SID")
+
+
+class ModelChoice(unittest.TestCase):
+    def setUp(self):
+        import os
+
+        self.saved = os.environ.get("LOOP_AGENT_MODEL")
+        self.addCleanup(self._restore)
+        os.environ.pop("LOOP_AGENT_MODEL", None)
+
+    def _restore(self):
+        import os
+
+        if self.saved is None:
+            os.environ.pop("LOOP_AGENT_MODEL", None)
+        else:
+            os.environ["LOOP_AGENT_MODEL"] = self.saved
+
+    def test_no_choice_leaves_it_to_the_runner(self):
+        self.assertNotIn("--model", runner.start_command("claude", "SID", "b"))
+
+    def test_a_configured_model_is_passed(self):
+        cmd = runner.start_command("claude", "SID", "b", model="sonnet")
+        self.assertEqual(cmd[cmd.index("--model") + 1], "sonnet")
+
+    def test_the_environment_overrides_configuration(self):
+        # One machine under load should not require editing every repository.
+        import os
+
+        os.environ["LOOP_AGENT_MODEL"] = "sonnet"
+        cmd = runner.start_command("claude", "SID", "b", model="opus")
+        self.assertEqual(cmd[cmd.index("--model") + 1], "sonnet")
+
+    def test_resume_carries_the_model_too(self):
+        cmd = runner.resume_command("claude", "SID", "go on", model="sonnet")
+        self.assertIn("--model", cmd)
+        self.assertEqual(cmd[-1], "go on")
+
+    def test_codex_takes_it_as_well(self):
+        cmd = runner.start_command("codex", None, "b", model="gpt-5.5")
+        self.assertEqual(cmd[cmd.index("--model") + 1], "gpt-5.5")
+        self.assertEqual(cmd[-1], "b")
+
+    def test_the_prompt_stays_last_with_a_model(self):
+        self.assertEqual(runner.start_command("claude", "SID", "the brief", model="sonnet")[-1],
+                         "the brief")
