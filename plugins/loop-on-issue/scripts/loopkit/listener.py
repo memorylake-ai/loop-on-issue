@@ -173,30 +173,59 @@ def dispatch(inbound: Inbound, conversations: List[str], has_pending: bool = Fal
 # acting on it
 # --------------------------------------------------------------------------- #
 
-HELP = """**loop-on-issue**
+#: DingTalk markdown is narrower than it looks: a single newline does **not**
+#: break a line, and `_underscore italics_` are not rendered at all. So every
+#: multi-line reply is built from list items — which do break — with blank lines
+#: between blocks. Getting this wrong does not error; it just arrives as one
+#: unreadable paragraph.
+def md(*blocks: str) -> str:
+    return "\n\n".join(block.strip() for block in blocks if block and block.strip())
 
-**直接发一句话 = 提需求**（不用加 `/`）。要作答请**引用回复**那张问题卡片。
 
-_提需求与查看_
-`/new <需求>` 提需求（与直接发一句话等价）
-`/p` 待审批的需求 · `/r <ID>` 看某条需求的状态与产物
-`/q` 待答问题 · `/ls [状态]` 看 issue 队列 · `/i <id>` 看某个 issue
-`/repos` 本机服务的仓库
+def bullets(*items: str) -> str:
+    return "\n".join("- {}".format(item) for item in items if item)
 
-_作答_
-引用回复问题卡片，或 `/a <id> <文本>`
 
-_仅审批人_
-`同意 <ID> [仓库] [备注]` 批准（也可写 `/approve`）
-`拒绝 <ID> <理由>` 驳回（也可写 `/reject`）
-`/dev <issue> [仓库]` 让 agent 现在就去开发这个 issue
-
-_看板维护_
-`/skip <id> confirm <理由>` 退掉 · `/requeue <id> confirm` 放回队列
-`/report` 重发上轮报告
-
-_其他_
-`/ping` 存活 · `/whoami` 看自己的 staffId 与会话 ID · `/h`（`/help`）本帮助"""
+HELP = md(
+    "**loop-on-issue**",
+    bullets(
+        "直接发一句话 = **提需求**（不用加 `/`）",
+        "作答请**引用回复**那张问题卡片",
+    ),
+    "**提需求 / 查看**",
+    bullets(
+        "`/new <需求>` — 提需求，与直接发一句话等价",
+        "`/p` — 待审批的需求",
+        "`/r <ID>` — 某条需求：状态 · 审批 · 产物",
+        "`/q` — 待答问题",
+        "`/ls [状态]` — issue 队列",
+        "`/i <id>` — 某个 issue",
+        "`/repos` — 本机服务的仓库",
+    ),
+    "**作答**",
+    bullets(
+        "引用回复问题卡片（可一次回多个编号）",
+        "`/a <id> <文本>` — 直接答某个 issue",
+    ),
+    "**仅审批人**",
+    bullets(
+        "`同意 <ID> [仓库] [备注]` — 批准，也可写 `/approve`",
+        "`拒绝 <ID> <理由>` — 驳回，也可写 `/reject`",
+        "`/dev <issue> [仓库]` — 让 agent 现在就去开发这个 issue",
+    ),
+    "**看板维护**",
+    bullets(
+        "`/skip <id> confirm <理由>` — 退掉一条 issue",
+        "`/requeue <id> confirm` — 放回队列",
+        "`/report` — 重发上轮报告",
+    ),
+    "**其他**",
+    bullets(
+        "`/ping` — 存活",
+        "`/whoami` — 看自己的 staffId 与会话 ID",
+        "`/h`（`/help`）— 本帮助",
+    ),
+)
 
 
 class Brain:
@@ -259,8 +288,10 @@ class Brain:
         if number is None:
             record = self.index.lookup(action.pqk) if action.pqk else self.index.newest()
             if not record:
-                return ("这条回复找不到对应的问题（卡片可能已过期或已被回答）。"
-                        "用 `/q` 看还有哪些在等，或 `/a <id> <文本>` 直接指定。")
+                return md(
+                    "这条回复找不到对应的问题（卡片可能已过期或已被回答）。",
+                    bullets("`/q` 看还有哪些在等", "`/a <id> <文本>` 直接指定"),
+                )
             number = record["issue"]
             repo = record.get("repo") or self.default_repo
             options = record.get("options") or []
@@ -294,9 +325,14 @@ class Brain:
         entry = self.registry.default
         if entry is None:
             names = "、".join(self.registry.names()) or "（一个都没配）"
-            return ("这台机器服务多个仓库，没有默认，我不知道这条需求归哪个。\n"
-                    "用 `/new <需求>` 之前先设默认，或让审批人批准时指定仓库。\n"
-                    "已配置：{}".format(names))
+            return md(
+                "这台机器服务多个仓库且没有默认，我不知道这条需求归哪个。",
+                bullets(
+                    "已配置：{}".format(names),
+                    "设默认：`loop repos default <名字>`",
+                    "或让审批人批准时指定：`同意 <ID> <仓库>`",
+                ),
+            )
 
         request = intake_mod.Request(
             id=self.store.new_id(),
@@ -313,16 +349,23 @@ class Brain:
 
         if auto:
             self.enqueue(request)
-            return ("已受理 **{}**（审批人本人提交，**免审批**），排入拆分队列。\n"
-                    "仓库：`{}` · 撤销：`拒绝 {} <理由>`".format(request.id, entry.repo, request.id))
-        return ("📥 已受理 **{}**，待 **{}** 批准。\n"
-                "> {}\n\n"
-                "拟归入：`{}`（{}）\n"
-                "批准：`同意 {}`，改仓库：`同意 {} <仓库>`，驳回：`拒绝 {} <理由>`".format(
-                    request.id, self.approver_nick,
-                    request.text.replace("\n", "\n> "),
-                    entry.repo, entry.name,
-                    request.id, request.id, request.id))
+            return md(
+                "🚀 已受理 **{}**（审批人本人提交，**免审批**），排入队列。".format(request.id),
+                bullets(
+                    "仓库：`{}`".format(entry.repo),
+                    "撤销：`拒绝 {} <理由>`".format(request.id),
+                ),
+            )
+        return md(
+            "📥 已受理 **{}**，待 **{}** 批准。".format(request.id, self.approver_nick),
+            "> {}".format(request.text.replace("\n", "\n> ")),
+            bullets(
+                "拟归入：`{}`（`{}`）".format(entry.repo, entry.name),
+                "批准：`同意 {}`".format(request.id),
+                "改仓库后批准：`同意 {} <仓库>`".format(request.id),
+                "驳回：`拒绝 {} <理由>`".format(request.id),
+            ),
+        )
 
     # -- commands ------------------------------------------------------------
     def _command(self, action: Action, inbound: Inbound) -> str:
@@ -344,18 +387,15 @@ class Brain:
         Answered from any conversation on purpose — see ALLOWLIST_EXEMPT.
         """
         listed = inbound.conversation_id in self.conversations
-        return (
-            "你：**{}**\n"
-            "```\n"
-            'LOOP_DINGTALK_APPROVER="{}"\n'
-            'LOOP_DINGTALK_APPROVER_NICK="{}"\n'
-            'LOOP_DINGTALK_CONVERSATIONS="{}"\n'
-            "```\n"
-            "本会话{}在白名单里。".format(
-                inbound.sender_nick or "?", inbound.sender_id or "?",
-                inbound.sender_nick or "", inbound.conversation_id or "?",
-                "已经" if listed else "**还不**",
-            )
+        return md(
+            "你是 **{}**".format(inbound.sender_nick or "?"),
+            "**粘进 `~/.loop-on-issue/dingtalk.env`**",
+            bullets(
+                '`LOOP_DINGTALK_APPROVER="{}"`'.format(inbound.sender_id or "?"),
+                '`LOOP_DINGTALK_APPROVER_NICK="{}"`'.format(inbound.sender_nick or ""),
+                '`LOOP_DINGTALK_CONVERSATIONS="{}"`'.format(inbound.conversation_id or "?"),
+            ),
+            "本会话{}在白名单里。".format("已经" if listed else "**还不**"),
         )
 
     def _cmd_ping(self, rest, inbound):
@@ -365,11 +405,14 @@ class Brain:
         records = self.index.all()
         if not records:
             return "没有等待中的问题。"
-        lines = ["**待答问题 {} 条**".format(len(records))]
-        for record in records[:20]:
-            lines.append("- {}#{} {}".format(
-                record.get("repo") or self.default_repo, record["issue"], record.get("url") or ""))
-        return "\n".join(lines)
+        return md(
+            "**待答问题 {} 条**".format(len(records)),
+            bullets(*[
+                "{}#{} {}".format(r.get("repo") or self.default_repo, r["issue"], r.get("url") or "")
+                for r in records[:20]
+            ]),
+            "引用回复那张卡片即可作答。",
+        )
 
     def _cmd_ls(self, rest, inbound):
         forge = self.forge_for(self.default_repo)
@@ -382,11 +425,11 @@ class Brain:
             buckets = {k: v for k, v in buckets.items() if k == wanted}
         if not buckets:
             return "队列是空的。"
-        lines = []
+        blocks = []
         for name, rows in buckets.items():
-            lines.append("**{}** ({})".format(name, len(rows)))
-            lines.extend("- " + row for row in rows[:10])
-        return "\n".join(lines)
+            blocks.append("**{}**（{}）".format(name, len(rows)))
+            blocks.append(bullets(*rows[:10]))
+        return md(*blocks)
 
     def _cmd_i(self, rest, inbound):
         number = _first_int(rest)
@@ -399,9 +442,15 @@ class Brain:
             return "找不到 #{}。".format(number)
         st, base = state.split_state(issue.title)
         marker = state.latest_marker(forge.list_issue_comments(number)) or {}
-        return "**#{} {}**\n状态：{} · runner：{} · session：{}\n{}".format(
-            number, base, st or "UNCLAIMED", marker.get("runner") or "—",
-            marker.get("session") or "—", issue.url)
+        return md(
+            "**#{} {}**".format(number, base),
+            bullets(
+                "状态：{}".format(st or "UNCLAIMED"),
+                "runner：{}".format(marker.get("runner") or "—"),
+                "session：{}".format(marker.get("session") or "—"),
+            ),
+            issue.url,
+        )
 
     def _cmd_a(self, rest, inbound):
         number = _first_int(rest)
@@ -422,43 +471,50 @@ class Brain:
         waiting = self.store.by_status(intake_mod.PENDING)
         if not waiting:
             return "没有待审批的需求。"
-        lines = ["**待审批 {} 条**".format(len(waiting))]
-        for request in waiting[:15]:
-            lines.append("- **{}** · `{}` · {} 提\n  > {}".format(
-                request.id, request.repo, request.requester or "?",
-                _one_line(request.text)))
-        return "\n".join(lines)
+        return md(
+            "**待审批 {} 条**".format(len(waiting)),
+            bullets(*[
+                "**{}** · `{}` · {} 提 — {}".format(
+                    r.id, r.repo, r.requester or "?", _one_line(r.text, 60))
+                for r in waiting[:15]
+            ]),
+            "批准：`同意 <ID>` · 驳回：`拒绝 <ID> <理由>`",
+        )
 
     def _cmd_r(self, rest, inbound):
         request = self.store.get((rest or "").strip().split(" ")[0])
         if not request:
             return "找不到 `{}`。用 `/p` 看待审批的。".format((rest or "").strip())
-        lines = [
-            "**{}** · {} · `{}`".format(request.id, request.status, request.repo),
-            "> {}".format(_one_line(request.text, 200)),
-            "提出：{}".format(request.requester or "?"),
-        ]
+        facts = ["提出：{}".format(request.requester or "?")]
         if request.approved_by:
-            lines.append("审批：{}{}".format(
+            facts.append("审批：{}{}".format(
                 request.approved_by, "（本人提交免审批）" if request.auto_approved else ""))
         if request.approval_note:
-            lines.append("审批备注：{}".format(request.approval_note))
+            facts.append("审批备注：{}".format(request.approval_note))
         if request.rejected_reason:
-            lines.append("驳回理由：{}".format(request.rejected_reason))
-        if request.issues:
-            lines.append("产出：\n" + "\n".join("- {}".format(u) for u in request.issues))
+            facts.append("驳回理由：{}".format(request.rejected_reason))
         if request.error:
-            lines.append("失败：{}".format(request.error))
-        return "\n".join(lines)
+            facts.append("失败：{}".format(request.error))
+        return md(
+            "**{}** · {} · `{}`".format(request.id, request.status, request.repo),
+            "> {}".format(_one_line(request.text, 200)),
+            bullets(*facts),
+            ("**产出**\n\n" + bullets(*request.issues)) if request.issues else "",
+        )
 
     def _cmd_repos(self, rest, inbound):
         entries = self.registry.all()
         if not entries:
             return "还没有配置任何仓库。"
         default = self.registry.default
-        return "\n".join(
-            "- `{}` → `{}`{}".format(e.name, e.repo, "  ← 默认" if default and e.name == default.name else "")
-            for e in entries
+        return md(
+            "**本机服务的仓库**",
+            bullets(*[
+                "`{}` → `{}`{}".format(
+                    e.name, e.repo, " ← **默认**" if default and e.name == default.name else "")
+                for e in entries
+            ]),
+            "" if default else "没有默认，裸需求无法路由：`loop repos default <名字>`",
         )
 
     def _cmd_approve(self, rest, inbound):
@@ -475,9 +531,11 @@ class Brain:
             return "{}（不会重复排队）".format(exc).replace("is already", "已经是")
         self.store.save(request)
         self.enqueue(request)
-        return "✅ **{}** 已批准，排入队列。仓库：`{}`{}".format(
-            request.id, request.repo,
-            "\n审批备注：{}".format(note) if note else "")
+        return md(
+            "✅ **{}** 已批准，排入队列。".format(request.id),
+            bullets(*(["仓库：`{}`".format(request.repo)] +
+                      (["审批备注：{}".format(note)] if note else []))),
+        )
 
     def _cmd_reject(self, rest, inbound):
         request_id, reason = _split_id(rest)
