@@ -121,6 +121,10 @@ loop session-id --id 612                # the id to resume with
 loop session-record --id 612 --session <id> --runner codex
 loop labels
 loop create --title "…" --body-file - [--blocked-by 613] [--epic 600] [--dry-run]
+
+loop ask --id 612 --question "…" [--option A --option B] [--wait 120]
+loop report --json-file -                # {"summary": "...", "notes": {"612": "..."}}
+loop dingtalk [status|sweep|serve]
 ```
 
 Exit codes are load-bearing: **0** success, **2** precondition not met (a routine
@@ -143,6 +147,55 @@ handled underneath:
   requests listing returns every MR that merely *mentions* the issue — which has
   attributed a third issue's work to two others and made their review feedback
   unreadable.
+
+## Asking a human
+
+An unattended run stops at decisions only a person can make. `loop ask` writes the
+question to the issue — which always works and is what the next scheduled run
+reads — and, when a chat channel is configured, pushes it to the group in the same
+step so somebody holding their phone can settle it in minutes instead of an
+interval.
+
+```sh
+loop ask --id 612 --question "Which writer is authoritative?"   --option "The streaming one" --option "The batch one" --option "Park it"
+```
+
+Answers come back **as issue comments**, wherever they were given. That is the
+whole design: an answer typed in chat is mirrored onto the issue, so it survives
+the machine, the process, and the person answering from a laptop instead of a
+phone — and a human who never opens chat can simply reply on the issue.
+
+**`AskUserQuestion` is intercepted.** A headless session has no UI to answer it, so
+a `PreToolUse` hook relays the question through `loop ask`, waits a short bounded
+window, and feeds the answer back to the model. Nothing answers within the window
+and the session is told to pause, which is where it would have ended up anyway.
+Outside a loop session the hook does nothing and the tool behaves normally.
+
+## Chat channel (DingTalk)
+
+Entirely optional — see [`plugins/loop-on-issue/dingtalk/README.md`](plugins/loop-on-issue/dingtalk/README.md)
+for setup. It has exactly three jobs:
+
+1. **Relay questions**, as above.
+2. **Report to both surfaces** — a run's summary to the group, and a note on each
+   issue the run touched, each written to be read on its own.
+3. **Take requirements.** `@bot <requirement>` files an *intake issue* —
+   deliberately unqueued, so the swarm cannot claim it. One configured approver
+   releases it; then `loop-issue-creator` decomposes it into queued slices linked
+   back with `--epic`.
+
+It never runs the swarm. Filing issues is where it stops, which is what makes the
+approval gate the only thing between a group message and unattended code changes.
+Answering a question is open to anyone in an allow-listed conversation and records
+who answered; approving is not.
+
+Because the intake is an issue and the approval is a comment, there is no local
+queue file and no approval state machine anywhere — the board is both, and the
+listener can be restarted at any moment without losing anything.
+
+The listener is the only component with a pip dependency (`dingtalk-stream`, for
+the inbound long connection) and keeps its own virtualenv. Without it, everything
+above still works; you answer on the issue instead of in chat.
 
 ## Runners
 
@@ -173,8 +226,11 @@ its own vocabulary.
 | `worktree_dir` | `.worktrees` | per-issue checkouts |
 | `template_lang` | `en` | `en` or `zh`, for the bundled fallbacks |
 | `verify_command` | `null` | this repo's real test command — **set it** |
+| `ask_wait` | `0` | seconds `loop ask` waits; 0 keeps sessions from blocking on a human |
+| `intake_label` | `intake` | label for a requirement raised in chat; never queued |
+| `creator_mode` | `routine` | who decomposes an approved requirement: the next run, or `immediate` |
 | `env_files` | `[".env"]` | gitignored files to copy into each worktree |
-| `escalation_command` | `null` | optional faster-than-next-run channel to a human |
+| `escalation_command` | `null` | a channel other than the built-in one — Slack, Feishu, a pager |
 
 Unrecognised keys are reported and ignored, so a config from a newer version does
 not stop an older one.
@@ -211,6 +267,11 @@ skills do not cross:
 - **Every agent comment goes through the CLI**, so it carries the invisible marker.
   Without it, an agent's own note later reads as a human reply and wakes an issue
   nobody answered.
+- **Chat can file work, never run it.** A requirement from the group becomes an
+  unqueued issue and waits for one named approver; nothing in the chat surface
+  starts a session.
+- **Credentials live outside the repository**, in `~/.loop-on-issue/dingtalk.env`
+  at mode 600.
 
 ## Development
 

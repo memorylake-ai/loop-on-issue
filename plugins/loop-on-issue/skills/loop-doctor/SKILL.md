@@ -138,6 +138,37 @@ template keep a section asking what must be true for the work to be finished;
 `doctor` warns when it cannot find one, because without it an issue is done when
 the session decides it is.
 
+## The chat channel
+
+Optional throughout. Without it a blocker still lands on the issue and the next
+scheduled run still picks up the answer — what is lost is the minutes-instead-of-
+an-interval path, and the ability to put work in from where the team talks. So
+every chat check is a warning; none of them can fail a run.
+
+```bash
+"$LOOP" dingtalk            # configured? which conversations? who approves?
+"$LOOP" dingtalk sweep      # drop stale open-question entries
+```
+
+Setting it up is a console-side task you cannot do for the user — walk them
+through `plugins/loop-on-issue/dingtalk/README.md` rather than paraphrasing it,
+and hold two points, because they are the ones people get wrong:
+
+- **The robot's 消息接收模式 must be Stream, not HTTP.** HTTP asks for a public
+  callback URL and nothing works locally. Stream needs no URL, no tunnel, no open
+  port — and it is the only mode that can *receive*, which is the whole point.
+- **The app must be published** (版本管理与发布), or the robot never appears in the
+  group's add-robot list at all.
+
+Once the listener is running, the bootstrap is one message: `@bot /whoami` in the
+group replies with the staffId and conversation id already formatted for pasting.
+That command is deliberately exempt from the conversation allow-list — otherwise
+filling the allow-list would require knowing a value only an allow-listed
+conversation would tell you.
+
+Credentials go to `~/.loop-on-issue/dingtalk.env` at mode 600, never into the
+repository. Never print a secret back to the user, and never commit one.
+
 ## Configuration reference
 
 `.loop-on-issue/config.json`, read by every command:
@@ -154,7 +185,10 @@ the session decides it is.
 | `template_lang` | `en` or `zh`, for the bundled fallbacks |
 | `verify_command` | this repo's real test command — **set it** |
 | `env_files` | gitignored files a worktree needs; `git worktree add` will not carry them over |
-| `escalation_command` | optional faster-than-the-next-run channel to a human; null means issue comments only |
+| `ask_wait` | seconds `loop ask` waits before letting an issue pause; 0 keeps the rule that a session never blocks on a human |
+| `intake_label` | label for a requirement raised in chat; such an issue is never queued |
+| `creator_mode` | `routine` (the next run decomposes an approved requirement) or `immediate` (the listener spawns one agent) |
+| `escalation_command` | a channel other than DingTalk — Slack, Feishu, a pager. Null means the built-in channel and the issue thread |
 
 An unrecognised key is reported and ignored, so a config written by a newer
 version of the plugin does not stop an older one.

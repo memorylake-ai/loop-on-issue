@@ -67,6 +67,39 @@ Four ways in, converging on one requirement statement before you decompose.
 | a spec / PRD path | read it; an unresolved TBD in the doc is pause-risk, not scope |
 | an existing epic issue | read the body *and* the comment thread — decisions live there; children get `--epic <n>`, and the parent never carries the queue label |
 | this conversation | decompose what was just designed; no separate artifact to read |
+| an intake issue from chat | a requirement raised in the team's group and approved; see below |
+
+## Invoked from a chat intake
+
+When a requirement arrives through the DingTalk channel it is filed as an **intake
+issue** first — unqueued, so the swarm cannot claim it — and decomposition starts
+only after the approver has released it. You will be pointed at that issue number.
+
+Read three things before anything else, and treat them as one document:
+
+1. **The requirement, verbatim**, in the issue body. It is the source of scope;
+   nothing outside it gets built.
+2. **The approval comment.** An approval note carries the *same weight as the
+   requirement itself* — "同意 712 注意别动定价页" narrows the scope as surely as the
+   original sentence did, and a slice that ignores it will be rejected in review.
+3. **The rest of the thread**, where clarifications land.
+
+Then:
+
+- Pass `--epic <intake id>` on every slice, so each one links back and the
+  requirement stays readable as a unit.
+- Confirm the draft through `loop ask --id <intake id>` rather than waiting at a
+  keyboard nobody is sitting at. Ask **one** question with the slice titles as
+  options plus an explicit "these are wrong, let me re-explain" — a person on
+  their phone can answer that; they cannot review six bodies there.
+- When the slices exist, comment the list on the intake issue and transition it to
+  `[FINISHED]`. The person who raised the requirement reads that comment, so name
+  each slice and link it.
+
+Refuse to decompose an intake issue that is not approved — no approval comment, or
+still `[PAUSED]`. The gate exists because filing queued issues *is* the trigger for
+unattended code changes, and being helpful past it defeats the only control there
+is.
 
 ## Recon: write the delta, not the feature
 
@@ -169,8 +202,10 @@ substance: whatever the headings are called, the session still needs the delta,
 the definition of done, and the command that proves it.
 
 State a **`[PAUSED]` trigger** in any slice with a judgement call in it: name the
-decision and say to stop and ask rather than pick. Pausing on a flagged question
-costs one interval; guessing wrong costs the whole slot and the review.
+decision and say to stop and ask rather than pick. A session hitting one calls
+`loop ask`, which reaches a human in chat and falls back to the issue; pausing on a
+flagged question costs one interval at worst, and guessing wrong costs the whole
+slot and the review.
 
 ## Labels and assignee
 

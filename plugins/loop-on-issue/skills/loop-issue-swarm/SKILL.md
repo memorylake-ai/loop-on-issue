@@ -219,6 +219,9 @@ printf 'note with **markdown** and 中文\n' | "$LOOP" comment --id 612 --body-f
 "$LOOP" pr-status --id 612      # linked change request; exit 2 = none attributed
 "$LOOP" pr-feedback --id 612    # exit 0 = unaddressed review feedback
 "$LOOP" session-id --id 612     # the id to resume with
+
+"$LOOP" ask --id 612 --question "…" --option A --option B   # ask a human
+"$LOOP" report --json-file -    # a run's outcome, to the issues and the group
 ```
 
 Exit codes are load-bearing: **0** success, **2** precondition not met, **1** a
@@ -298,6 +301,12 @@ Claim **immediately** on selection, before any planning or file reading. The gap
 between deciding to work an issue and marking it is the only window where two runs
 can collide, so keep it near zero. If `claim` exits 2, move on.
 
+`claim` also writes a comment recording which runner and which session now own the
+issue. That is what makes the board — not a derivation rule — the answer to "who is
+working this", so a later run, another machine, or a human can read it back
+without recomputing anything. For a runner that assigns its own session id, the
+comment records the runner now and `session-record` fills in the id at start.
+
 Then comment on each claimed issue with a one-line statement of what you
 understand the task to be — a human's earliest chance to catch a misread.
 
@@ -346,13 +355,35 @@ Three things about that, all of which have cost a run somewhere:
   for stragglers if it fires repeatedly. On timeout leave the issue at `WORKING`
   and comment — Phase 0 picks it up as an orphan next run.
 
-### Phase 3 — Report
+### Phase 3 — Report, to both surfaces
 
 Per issue: final state, branch, change request URL if any, and what a human needs
 to do next. Lead with anything in `PAUSED` — those hold up the queue.
 
 Always list the issues you retired as `[SKIP]` this run, with reasons. Later runs
 never revisit them, so this is the only moment a human is prompted to disagree.
+
+Write it with `loop report`, which puts the summary in the group and a per-issue
+note on each issue the run touched:
+
+```bash
+printf '%s' "$(cat <<'JSON'
+{
+  "summary": "3 claimed · 1 finished (!903) · 1 paused on #612 · 1 skipped\n…",
+  "notes": {
+    "630": "Finished this run: !903 open against main, awaiting review.",
+    "612": "Paused: asked which writer is authoritative. Answer on this issue to resume."
+  }
+}
+JSON
+)" | "$LOOP" report --json-file -
+```
+
+Write each surface to stand on its own. The group message must not say "see the
+issue", and an issue note must not say "see the group" — someone reading either
+one is usually reading only that one. If the chat channel is not configured,
+`report` says so and the issue notes still land; that is a normal outcome, not a
+failure.
 
 ## Per-issue session brief
 
@@ -424,20 +455,41 @@ A blocker is anything where guessing could waste the work: an ambiguous
 requirement, a design decision with real trade-offs, a failing test you cannot
 attribute, a missing credential, a conflict needing product judgement.
 
-1. Comment on the issue with what you tried, what you found, and the specific
-   question — concrete enough that answering takes one sentence. This is the
-   durable channel: what the next run reads, and what the human answers.
-2. If `escalation_command` is configured, invoke it to notify faster than the next
-   scheduled run. It must **push and return**, not wait: a session that blocks for
-   fifteen minutes holds a slot, keeps the machine warm, and still ends up paused
-   if the human was at lunch. Include a line telling them to reply on the issue if
-   the notification has expired, because it usually will have.
-3. Then transition to `PAUSED` and **end the session**, leaving the worktree and
+1. **Ask through `loop ask`.** It writes the question to the issue — the durable
+   channel, what the next run reads — and pushes it to chat in the same step, so a
+   human who is around can settle it in minutes instead of a routine interval.
+
+   ```bash
+   "$LOOP" ask --id 612 \
+     --question "Resume paths differ on the two writers; which one is authoritative?" \
+     --option "The streaming writer — the batch one is legacy" \
+     --option "The batch writer, and the streaming one should follow it" \
+     --option "Park it: I need to look at the data first"
+   ```
+
+   Make the question answerable in one sentence, and **offer a park option**:
+   someone who is looking but cannot decide now should be able to say so without
+   the queue stalling on silence.
+
+   `ask` exits **2** when nobody has answered, which is the expected outcome, not
+   a failure. It does not wait by default, deliberately — see below.
+
+2. Then transition to `PAUSED` and **end the session**, leaving the worktree and
    branch intact so the next run resumes this same session instead of rebuilding.
 
 **Do not wait for the human.** No retry loop, no `sleep`, no second ask, no
 polling the issue. The outer routine *is* the waiting mechanism and it waits for
-free.
+free; a session that blocks for fifteen minutes holds a slot, keeps the machine
+warm, and still ends up paused if the human was at lunch.
+
+The one exception is not yours to make: if a session calls `AskUserQuestion`, a
+hook intercepts it and waits a short, bounded window before telling the session to
+pause. That is the same channel, taken automatically, because a headless session
+has no other way to answer that tool.
+
+`escalation_command` remains for anyone routing to Slack, Feishu or a pager
+instead of DingTalk; when it is set, invoke it after `ask` and require that it
+**push and return** rather than wait.
 
 And park rather than abandon: releasing a stuck issue with `--to NONE` guarantees
 the next run repeats the same failure, while `PAUSED` puts it in front of a human.
