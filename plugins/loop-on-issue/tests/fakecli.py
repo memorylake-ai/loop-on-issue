@@ -109,6 +109,10 @@ class FakeCLI:
                 "stdout": stdout,
                 "stderr": kwargs.get("stderr", ""),
                 "exit": int(kwargs.get("exit", 0)),
+                # A route that fires once then steps aside, so a test can model a
+                # value that changes between two reads — a claim being written,
+                # say, and then read back.
+                "once": bool(kwargs.get("once", False)),
             }
         )
         self._render()
@@ -116,9 +120,14 @@ class FakeCLI:
 
     def _render(self) -> None:
         lines = []
-        for route in self._routes:
+        for index, route in enumerate(self._routes):
             cond = " && ".join("has {}".format(shlex.quote(m)) for m in route["match"]) or "true"
+            if route["once"]:
+                stamp = os.path.join(self.dir, "used-{}".format(index))
+                cond += " && [ ! -f {} ]".format(shlex.quote(stamp))
             lines.append("if {}; then".format(cond))
+            if route["once"]:
+                lines.append("  : > {}".format(shlex.quote(stamp)))
             if route["stdout"]:
                 lines.append("  printf '%s' {}".format(shlex.quote(route["stdout"])))
             if route["stderr"]:
