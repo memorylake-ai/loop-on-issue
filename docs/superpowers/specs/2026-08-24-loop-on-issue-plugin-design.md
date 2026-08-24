@@ -156,7 +156,8 @@ Resolution order, reported by `loop template show`:
 
 Default issue template carries the six slots the swarm reads positionally — Background,
 Current vs Expected, Acceptance criteria, File boundary, Out of scope, Verification — plus a
-`<!-- loop-on-issue -->` marker so the creator can tell a loop template from a generic one.
+`<!-- loop-on-issue:template -->` marker (matching the `loop-on-issue:agent` comment marker)
+so tooling can tell a loop template from a generic one.
 Default PR template is Motivation / Modifications / `closes #N`.
 
 ### `loopkit.runner`
@@ -183,8 +184,9 @@ repo reachable with write access · queue label exists · assignee resolvable ·
 source · PR template source · config valid · runner binary present · `base_branch` resolvable ·
 git identity set.
 
-Exit codes match the rest of the CLI: **0** all clear, **2** something needs attention, **1**
-the doctor itself failed.
+Exit codes: **0** when nothing is *blocking*, **2** when at least one check failed. Warnings
+print but never block — an unset `verify_command` is worth knowing about and is not a reason
+to refuse to start.
 
 `loop init` is doctor plus guided remediation, and has two hard boundaries:
 
