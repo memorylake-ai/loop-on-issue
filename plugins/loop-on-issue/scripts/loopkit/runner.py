@@ -47,6 +47,18 @@ TIMEOUT_EXIT = 142
 #: surface without a named approver. Narrow it if your situation differs.
 PERMISSION_MODE = "bypassPermissions"
 
+#: Spawned sessions get **no** MCP servers unless one is passed deliberately.
+#:
+#: They would otherwise inherit whatever the human has configured, which on a
+#: real machine means starting an `npm exec` per server and handing an unattended
+#: agent tools for the human's mail, chat and design files. Observed on the first
+#: run: a decomposition job sat for ten minutes at 0.6% CPU while a browser
+#: automation server came up, with nothing in the task that wanted a browser.
+#:
+#: Two costs avoided, and the second is the serious one: startup time, and the
+#: reach of a session already running under bypassPermissions.
+STRICT_MCP = ("--strict-mcp-config",)
+
 _RUNNER_LABEL_RE = re.compile(r"^runner::?(?P<name>[\w.-]+)$", re.IGNORECASE)
 _ID_KEY_RE = re.compile(r"(session|thread|conversation)_?id$", re.IGNORECASE)
 
@@ -153,6 +165,7 @@ def start_command(
     """
     if name == CLAUDE:
         cmd = ["claude", "-p", "--permission-mode", permission_mode]
+        cmd += list(STRICT_MCP)
         if session:
             cmd += ["--session-id", session]
         cmd.append(prompt)
@@ -184,7 +197,8 @@ def resume_command(
     if not session:
         raise ValueError("cannot resume without a session id")
     if name == CLAUDE:
-        return ["claude", "-p", "--permission-mode", permission_mode, "--resume", session, prompt]
+        return (["claude", "-p", "--permission-mode", permission_mode]
+                + list(STRICT_MCP) + ["--resume", session, prompt])
     if name == CODEX:
         return [
             "codex", "exec", "resume", session,

@@ -142,3 +142,28 @@ class ExtractSessionId(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MCPIsolation(unittest.TestCase):
+    """A spawned session must not inherit the human's MCP servers.
+
+    Two reasons, and the second is the serious one: every configured server costs
+    a process start the task did not ask for, and an unattended session running
+    under bypassPermissions would be handed tools for the human's mail, chat and
+    design files.
+    """
+
+    def test_start_is_isolated(self):
+        self.assertIn("--strict-mcp-config", runner.start_command("claude", "SID", "b"))
+
+    def test_resume_is_isolated_too(self):
+        # A resumed session is the same session, with the same reach.
+        self.assertIn("--strict-mcp-config", runner.resume_command("claude", "SID", "go on"))
+
+    def test_the_prompt_is_still_last(self):
+        cmd = runner.start_command("claude", "SID", "the brief")
+        self.assertEqual(cmd[-1], "the brief")
+
+    def test_the_session_id_is_still_pinned(self):
+        cmd = runner.start_command("claude", "SID", "b")
+        self.assertEqual(cmd[cmd.index("--session-id") + 1], "SID")
