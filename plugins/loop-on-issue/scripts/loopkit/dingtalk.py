@@ -48,6 +48,27 @@ def default_env_paths() -> List[str]:
     return paths
 
 
+def _env_value(raw: str) -> str:
+    """The value from the right-hand side of a `KEY=...` line.
+
+    A quoted value is exactly what is between the quotes; anything after the
+    closing quote — a trailing `# comment`, stray whitespace — is discarded. An
+    unquoted value runs until an inline comment, which (as in shell and
+    python-dotenv) must be preceded by whitespace, so a `#` that is part of the
+    value survives. Getting this wrong is not cosmetic: `ROBOT_CODE="ding"  # note`
+    read whole makes a bot look configured while authenticating with garbage.
+    """
+    raw = raw.lstrip()
+    if raw[:1] in ('"', "'"):
+        quote = raw[0]
+        end = raw.find(quote, 1)
+        return raw[1:end] if end != -1 else raw[1:]
+    for i in range(1, len(raw)):
+        if raw[i] == "#" and raw[i - 1] in (" ", "\t"):
+            return raw[:i].rstrip()
+    return raw.rstrip()
+
+
 def load_env(paths: Optional[List[str]] = None, environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Read shell-style `KEY="value"` files, most significant first.
 
@@ -72,11 +93,7 @@ def load_env(paths: Optional[List[str]] = None, environ: Optional[Dict[str, str]
             key, sep, value = line.partition("=")
             if not sep:
                 continue
-            key = key.strip()
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-                value = value[1:-1]
-            result.setdefault(key, value)
+            result.setdefault(key.strip(), _env_value(value))
     for key, value in environ.items():
         if key.startswith(("DINGTALK_", "LOOP_DINGTALK_")):
             result.setdefault(key, value)
