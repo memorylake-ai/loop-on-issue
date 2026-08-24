@@ -266,6 +266,34 @@ class Brains(unittest.TestCase):
         self.assertIn("WORKING", reply)
         self.assertIn("612", reply)
 
+    def test_ls_returning_only_one_repos_issues_when_two_configured(self):
+        # Bug: /ls called self.forge_for(self.default_repo) and iterated issues from
+        # that one forge only, so a second registered repo never appeared in the reply.
+        from loopkit import repos as repos_mod
+        from loopkit import intake as intake_mod
+        forge_widget = FakeForge()
+        forge_backend = FakeForge()
+        forge_widget.add(612, title="widget issue")
+        forge_backend.add(34, title="backend issue")
+        forges = {"acme/widget": forge_widget, "acme/backend": forge_backend}
+        registry = repos_mod.Registry()
+        registry.add("widget", "acme/widget", self.dir + "/widget")
+        registry.add("backend", "acme/backend", self.dir + "/backend")
+        brain = listener.Brain(
+            forge_for=lambda repo: forges[repo],
+            registry=registry,
+            index=self.index,
+            store=intake_mod.Store(self.dir + "/intake"),
+            conversations=["cid-1"],
+            approver=self.APPROVER,
+            approver_nick="Julian",
+            queue_label="loop",
+            assignee="muxuan",
+        )
+        reply = brain.handle(msg(text="/ls"))
+        self.assertIn("widget#612", reply)
+        self.assertIn("backend#34", reply)
+
     def test_q_lists_open_questions(self):
         self.index.record("k", {"repo": "acme/widget", "issue": 612, "url": "https://f/612"})
         self.assertIn("612", self.brain.handle(msg(text="/q")))

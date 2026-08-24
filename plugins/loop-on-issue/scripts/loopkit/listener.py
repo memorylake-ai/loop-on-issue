@@ -507,12 +507,19 @@ class Brain:
         )
 
     def _cmd_ls(self, rest, inbound):
-        forge = self.forge_for(self.default_repo)
         wanted = (rest or "").strip().upper() or None
         buckets: Dict[str, List[str]] = {}
-        for issue in forge.list_issues(label=self.queue_label, assignee=self.assignee):
-            st, base = state.split_state(issue.title)
-            buckets.setdefault(st or "UNCLAIMED", []).append("#{} {}".format(issue.number, base))
+        entries = self.registry.all()
+        multi_repo = len(entries) > 1
+        for entry in entries:
+            forge = self.forge_for(entry.repo)
+            for issue in forge.list_issues(label=self.queue_label, assignee=self.assignee):
+                st, base = state.split_state(issue.title)
+                if multi_repo:
+                    line = "{}#{} {}".format(entry.name, issue.number, base)
+                else:
+                    line = "#{} {}".format(issue.number, base)
+                buckets.setdefault(st or "UNCLAIMED", []).append(line)
         if wanted:
             buckets = {k: v for k, v in buckets.items() if k == wanted}
         if not buckets:
