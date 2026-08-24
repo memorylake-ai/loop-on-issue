@@ -105,12 +105,35 @@ class Intake(Base):
         self.assertIn("widget", reply)
         self.assertIn("Julian", reply)
 
-    def test_the_approver_raising_it_is_auto_approved_and_queued(self):
+    def test_the_approver_is_asked_to_confirm_rather_than_queued(self):
+        # Queueing their own requirement instantly read as convenient and was
+        # not: that is the moment the repository gets chosen, and it went by
+        # without anyone being asked.
+        reply = self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
+        req = self.store.all()[0]
+        self.assertEqual(req.status, intake_mod.PENDING)
+        self.assertEqual(self.enqueued, [])
+        self.assertIn("确认", reply)
+        self.assertIn(req.id, reply)
+
+    def test_the_approver_sees_where_it_would_land_and_the_alternatives(self):
+        reply = self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
+        self.assertIn("acme/widget", reply)
+        self.assertIn("org/bloom", reply)
+
+    def test_confirming_queues_it(self):
         self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
         req = self.store.all()[0]
-        self.assertTrue(req.auto_approved)
-        self.assertEqual(req.status, intake_mod.APPROVED)
+        self.brain.handle(msg(text="同意 " + req.id, msg_id="m2", sender=self.APPROVER))
+        self.assertEqual(self.store.get(req.id).status, intake_mod.APPROVED)
         self.assertEqual([r.id for r in self.enqueued], [req.id])
+
+    def test_confirming_with_a_repository_redirects_it(self):
+        self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
+        req = self.store.all()[0]
+        self.brain.handle(msg(text="同意 {} bloom".format(req.id), msg_id="m2",
+                              sender=self.APPROVER))
+        self.assertEqual(self.store.get(req.id).repo, "org/bloom")
 
     def test_an_ordinary_requester_queues_nothing_yet(self):
         self.brain.handle(msg(text="做个东西"))
@@ -275,29 +298,33 @@ class OpenQueueVisibility(Base):
     truthfully, because the request was in a third queue nothing could see.
     """
 
+    def _queue_one(self):
+        self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
+        request = self.store.all()[0]
+        self.brain.handle(msg(text="同意 " + request.id, msg_id="ok", sender=self.APPROVER))
+        return self.store.get(request.id)
+
     def test_p_shows_a_request_that_is_queued_for_execution(self):
-        self.brain.handle(msg(text="做个东西", sender=self.APPROVER))  # auto-approved
+        self._queue_one()
         reply = self.brain.handle(msg(text="/p", msg_id="m2"))
         self.assertIn(self.store.all()[0].id, reply)
         self.assertIn("排队等执行", reply)
 
     def test_p_shows_a_running_request(self):
-        self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
-        request = self.store.all()[0]
+        request = self._queue_one()
         request.start(session="s")
         self.store.save(request)
         self.assertIn("正在执行", self.brain.handle(msg(text="/p", msg_id="m2")))
 
     def test_p_separates_waiting_for_approval_from_waiting_to_run(self):
         self.brain.handle(msg(text="别人提的", sender="somebody"))
-        self.brain.handle(msg(text="我自己提的", msg_id="m2", sender=self.APPROVER))
+        self._queue_one()
         reply = self.brain.handle(msg(text="/p", msg_id="m3"))
         self.assertIn("待审批", reply)
         self.assertIn("排队等执行", reply)
 
     def test_a_finished_request_is_no_longer_open(self):
-        self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
-        request = self.store.all()[0]
+        request = self._queue_one()
         request.start()
         request.finish(issues=["https://f/1"])
         self.store.save(request)
@@ -310,13 +337,92 @@ class OpenQueueVisibility(Base):
         self.assertIn("/ls", reply)
 
     def test_the_acknowledgement_names_the_command_that_can_see_it(self):
-        reply = self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
-        self.assertIn("/p", reply)
-        self.assertIn("/ls", reply)
-
-    def test_r_shows_the_resumable_session(self):
         self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
         request = self.store.all()[0]
+        reply = self.brain.handle(msg(text="同意 " + request.id, msg_id="ok",
+                                      sender=self.APPROVER))
+        self.assertIn("/p", reply)
+
+    def test_r_shows_the_resumable_session(self):
+        request = self._queue_one()
         request.start(session="abc-123")
         self.store.save(request)
         self.assertIn("abc-123", self.brain.handle(msg(text="/r " + request.id, msg_id="m2")))
+
+
+class ChoosingTheRepo(Base):
+    """A requirement has to be routable at the moment it is raised.
+
+    The approver's own requirement is auto-approved and queued instantly, so
+    there is no approval step to redirect it in — which left the one person
+    allowed to choose a repository with no way to say which.
+    """
+
+    def test_a_leading_registered_name_routes_the_requirement(self):
+        self.brain.handle(msg(text="bloom 把首页 CTA 改强一点", sender=self.APPROVER))
+        request = self.store.all()[0]
+        self.assertEqual(request.repo, "org/bloom")
+
+    def test_the_name_is_not_left_in_the_requirement_text(self):
+        self.brain.handle(msg(text="bloom 把首页 CTA 改强一点", sender=self.APPROVER))
+        self.assertEqual(self.store.all()[0].text, "把首页 CTA 改强一点")
+
+    def test_a_leading_word_that_is_not_a_repository_stays_in_the_text(self):
+        # Consuming it would silently eat a word from somebody's requirement.
+        self.brain.handle(msg(text="紧急 把首页 CTA 改强一点", sender=self.APPROVER))
+        request = self.store.all()[0]
+        self.assertEqual(request.text, "紧急 把首页 CTA 改强一点")
+        self.assertEqual(request.repo, "acme/widget")
+
+    def test_the_acknowledgement_says_a_name_was_consumed(self):
+        # A false positive has to be visible, since it costs a word of the text.
+        reply = self.brain.handle(msg(text="bloom 做个东西", sender=self.APPROVER))
+        self.assertIn("bloom", reply)
+        self.assertIn("/repo", reply)
+
+    def test_new_takes_a_repository_too(self):
+        self.brain.handle(msg(text="/new bloom 做个东西", sender=self.APPROVER))
+        self.assertEqual(self.store.all()[0].repo, "org/bloom")
+
+    def test_a_full_project_path_works_as_well_as_the_short_name(self):
+        self.brain.handle(msg(text="org/bloom 做个东西", sender=self.APPROVER))
+        self.assertEqual(self.store.all()[0].repo, "org/bloom")
+
+
+class Redirecting(Base):
+    def _queued(self):
+        self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
+        request = self.store.all()[0]
+        self.brain.handle(msg(text="同意 " + request.id, msg_id="ok", sender=self.APPROVER))
+        return self.store.get(request.id)
+
+    def test_a_queued_request_can_still_be_redirected(self):
+        request = self._queued()
+        reply = self.brain.handle(msg(text="/repo {} bloom".format(request.id),
+                                      msg_id="m2", sender=self.APPROVER))
+        self.assertEqual(self.store.get(request.id).repo, "org/bloom")
+        self.assertIn("bloom", reply)
+
+    def test_a_running_request_cannot_be(self):
+        # The agent is already in the other checkout; moving the label would only
+        # make the record lie about where the work happened.
+        request = self._queued()
+        request.start(session="s")
+        self.store.save(request)
+        reply = self.brain.handle(msg(text="/repo {} bloom".format(request.id),
+                                      msg_id="m2", sender=self.APPROVER))
+        self.assertIn("已经在跑", reply)
+        self.assertEqual(self.store.get(request.id).repo, "acme/widget")
+
+    def test_only_the_approver_may_redirect(self):
+        request = self._queued()
+        reply = self.brain.handle(msg(text="/repo {} bloom".format(request.id),
+                                      msg_id="m2", sender="somebody"))
+        self.assertIn("只有", reply)
+
+    def test_an_unregistered_name_is_refused_with_the_options(self):
+        request = self._queued()
+        reply = self.brain.handle(msg(text="/repo {} nowhere".format(request.id),
+                                      msg_id="m2", sender=self.APPROVER))
+        self.assertIn("widget", reply)
+        self.assertEqual(self.store.get(request.id).repo, "acme/widget")

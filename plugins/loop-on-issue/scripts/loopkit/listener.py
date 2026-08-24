@@ -40,7 +40,7 @@ INTAKE = "intake"
 #: Approving a requirement and starting a session on an issue are the same class
 #: of act — both put an unattended agent to work — so they sit behind the same
 #: gate. Everything else, answering included, is open to the conversation.
-APPROVER_ONLY = ("approve", "reject", "dev")
+APPROVER_ONLY = ("approve", "reject", "dev", "repo")
 
 #: The one command an unlisted conversation may run. Without it the allow-list is
 #: a bootstrap deadlock: you cannot fill in a conversationId without first being
@@ -58,7 +58,7 @@ _ALIASES = {
     "new": "new", "intake": "new",
     "p": "p", "reqs": "p", "requests": "p",
     "r": "r", "req": "r",
-    "repos": "repos", "repo": "repos",
+    "repos": "repos", "repo": "repo",
     "dev": "dev", "go": "dev", "start": "dev",
     "approve": "approve", "ok": "approve",
     "reject": "reject",
@@ -194,7 +194,7 @@ HELP = md(
     ),
     "**提需求 / 查看**",
     bullets(
-        "`/new <需求>` — 提需求，与直接发一句话等价",
+        "`/new [仓库] <需求>` — 提需求，与直接发一句话等价",
         "`/p` — 待审批的需求",
         "`/r <ID>` — 某条需求：状态 · 审批 · 产物",
         "`/q` — 待答问题",
@@ -212,6 +212,7 @@ HELP = md(
         "`同意 <ID> [仓库] [备注]` — 批准，也可写 `/approve`",
         "`拒绝 <ID> <理由>` — 驳回，也可写 `/reject`",
         "`/dev <issue> [仓库]` — 让 agent 现在就去开发这个 issue",
+        "`/repo <ID> <仓库>` — 改某条需求归哪个仓库（开跑前有效）",
     ),
     "**看板维护**",
     bullets(
@@ -313,7 +314,7 @@ class Brain:
         return "已把你的答复写到 {}#{}。".format(repo, number)
 
     # -- intake --------------------------------------------------------------
-    def _intake(self, text: str, inbound: Inbound) -> str:
+    def _intake(self, text: str, inbound: Inbound) -> str:  # noqa: C901
         """File a requirement locally. Nothing reaches the forge until approved.
 
         An earlier version created an unqueued issue here, which meant anybody who
@@ -322,8 +323,13 @@ class Brain:
         not, and an issue tracker full of unapproved one-liners stops being
         readable.
         """
-        entry = self.registry.default
-        if entry is None:
+        # A leading registered name routes the requirement. This is the only
+        # chance the approver gets when raising one themselves: their own
+        # requirement is auto-approved and queued instantly, so there is no
+        # approval step to redirect it in.
+        named, text = self._split_repo(text)
+        entry = self.registry.get(named) if named else self.registry.default
+        if entry is None and named is None:
             names = "、".join(self.registry.names()) or "（一个都没配）"
             return md(
                 "这台机器服务多个仓库且没有默认，我不知道这条需求归哪个。",
@@ -342,27 +348,49 @@ class Brain:
             conversation=inbound.conversation_id,
             repo=entry.repo,
         )
-        auto = bool(self.approver) and inbound.sender_id == self.approver
-        if auto:
-            request.approve(by=inbound.sender_nick or self.approver_nick, auto=True)
+        consumed_note = (
+            "　— 用掉了开头的 `{}`；若那本是需求的一部分，`/repo` 改回".format(named)
+            if named else "")
+        mine = bool(self.approver) and inbound.sender_id == self.approver
+
+        request = intake_mod.Request(
+            id=self.store.new_id(),
+            text=text.strip(),
+            requester=inbound.sender_nick,
+            requester_id=inbound.sender_id,
+            conversation=inbound.conversation_id,
+            repo=entry.repo,
+        )
         self.store.save(request)
 
-        if auto:
-            self.enqueue(request)
+        # Everybody's requirement waits for one confirming message, the approver's
+        # included. Queueing theirs instantly read as convenient and was not: it
+        # is the moment the repository gets chosen, and it was going by without
+        # anyone being asked. One round trip buys a look at how the text was
+        # understood and where it is about to land.
+        choices = bullets(*[
+            "`同意 {} {}` → `{}`{}".format(
+                request.id, e.name, e.repo,
+                "  ← 默认" if entry and e.name == entry.name else "")
+            for e in self.registry.all()
+        ])
+        if mine:
             return md(
-                "🚀 已受理 **{}**（审批人本人提交，**免审批**），排入执行队列。".format(request.id),
+                "📥 **{}** 已记下，确认一下就开跑。".format(request.id),
+                "> {}".format(request.text.replace("\n", "\n> ")),
                 bullets(
-                    "仓库：`{}`".format(entry.repo),
-                    "看进度：`/p`，或 `/r {}` 看这一条".format(request.id),
-                    "撤销：`拒绝 {} <理由>`".format(request.id),
+                    "拟归入：`{}`（`{}`）{}".format(entry.repo, entry.name, consumed_note),
+                    "确认：`同意 {}`".format(request.id),
+                    "不要了：`拒绝 {} <理由>`".format(request.id),
                 ),
-                "拆完的 issue 才会出现在 `/ls` 里。",
+                "换仓库：" if len(self.registry.all()) > 1 else "",
+                choices if len(self.registry.all()) > 1 else "",
             )
         return md(
             "📥 已受理 **{}**，待 **{}** 批准。".format(request.id, self.approver_nick),
             "> {}".format(request.text.replace("\n", "\n> ")),
             bullets(
-                "拟归入：`{}`（`{}`）".format(entry.repo, entry.name),
+                "拟归入：`{}`（`{}`）{}".format(entry.repo, entry.name, consumed_note),
                 "批准：`同意 {}`".format(request.id),
                 "改仓库后批准：`同意 {} <仓库>`".format(request.id),
                 "驳回：`拒绝 {} <理由>`".format(request.id),
@@ -463,8 +491,29 @@ class Brain:
 
     def _cmd_new(self, rest, inbound):
         if not (rest or "").strip():
-            return "用法：`/new <需求>`"
+            return "用法：`/new [仓库] <需求>`"
         return self._intake(rest.strip(), inbound)
+
+    def _cmd_repo(self, rest, inbound):
+        """Point a request at a different repository, before it starts."""
+        request_id, remainder = _split_id(rest)
+        request = self.store.get(request_id) if request_id else None
+        if not request:
+            return "用法：`/repo <ID> <仓库名字>`"
+        entry = self.registry.get((remainder or "").strip().split(" ")[0])
+        if not entry:
+            return md(
+                "不认识仓库 `{}`。".format((remainder or "").strip() or "（空）"),
+                bullets(*["`{}` → `{}`".format(e.name, e.repo) for e in self.registry.all()]),
+            )
+        if request.status not in (intake_mod.PENDING, intake_mod.APPROVED):
+            # The agent is already in the other checkout; moving the label would
+            # only make the record lie about where the work happened.
+            return "**{}** 已经在跑（或已结束），改不了了。当前：`{}`".format(
+                request.id, request.repo)
+        request.repo = entry.repo
+        self.store.save(request)
+        return "**{}** 改归 `{}`（`{}`）。".format(request.id, entry.repo, entry.name)
 
     def _cmd_report(self, rest, inbound):
         return self.last_report or "还没有可重发的报告。"
@@ -556,9 +605,13 @@ class Brain:
         self.store.save(request)
         self.enqueue(request)
         return md(
-            "✅ **{}** 已批准，排入队列。".format(request.id),
-            bullets(*(["仓库：`{}`".format(request.repo)] +
-                      (["审批备注：{}".format(note)] if note else []))),
+            "✅ **{}** 已批准，排入执行队列。".format(request.id),
+            bullets(*(
+                ["仓库：`{}`".format(request.repo)]
+                + (["审批备注：{}".format(note)] if note else [])
+                + ["看进度：`/p`，或 `/r {}` 看这一条".format(request.id)]
+            )),
+            "拆完的 issue 才会出现在 `/ls` 里。",
         )
 
     def _cmd_reject(self, rest, inbound):
