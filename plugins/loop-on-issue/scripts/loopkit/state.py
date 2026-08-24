@@ -138,19 +138,24 @@ def parse_marker(body: str) -> Optional[Dict[str, str]]:
     return dict(_ATTR_RE.findall(m.group("attrs")))
 
 
-def relay(text: str, by: str = None, via: str = "dingtalk") -> str:
+def relay(text: str, by: str = None, via: str = "dingtalk", choice: str = None) -> str:
     """Wrap an answer a human gave somewhere else, for posting onto the issue.
 
     The visible line names who said it, because six weeks later the issue is the
-    only record that a decision was made and by whom.
+    only record that a decision was made and by whom — and, when the answer was a
+    bare option number, what that number *meant*. The answer itself is relayed
+    verbatim below it, so the machine-readable form survives: resolving "2" to
+    "right" in the body would stop it parsing as a selection at all.
     """
     attrs = ""
     if by:
         attrs += " by={}".format(_slugish(by))
     if via:
         attrs += " via={}".format(via)
-    who = "**{}** 在 {} 回答：".format(by, via) if by else "在 {} 收到的回答：".format(via)
-    return "<!-- {}{} -->\n{}\n\n{}".format(RELAY_NAME, attrs, who, text.strip())
+    who = "**{}** 在 {} 回答".format(by, via) if by else "在 {} 收到的回答".format(via)
+    if choice:
+        who += "（选了：{}）".format(choice)
+    return "<!-- {}{} -->\n{}：\n\n{}".format(RELAY_NAME, attrs, who, text.strip())
 
 
 def parse_relay(body: str) -> Tuple[Optional[Dict[str, str]], str]:
@@ -162,7 +167,7 @@ def parse_relay(body: str) -> Tuple[Optional[Dict[str, str]], str]:
     rest = (body[: m.start()] + body[m.end():]).strip()
     # Drop the human-facing attribution line the relay adds above the answer.
     lines = rest.split("\n")
-    if lines and ("回答：" in lines[0]):
+    if lines and ("回答" in lines[0]):
         rest = "\n".join(lines[1:]).strip()
     return attrs, rest
 

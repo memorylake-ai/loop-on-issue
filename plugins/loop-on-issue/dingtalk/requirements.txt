@@ -1,0 +1,10 @@
+# Inbound only. Everything else in this plugin is standard library, and stays
+# that way — `loop ask`, `loop report` and the AskUserQuestion hook all work with
+# none of this installed. What you lose without it is the ability to *answer* in
+# DingTalk; answers on the issue keep working.
+dingtalk-stream>=0.24.3
+
+# Required when a system proxy is configured (Clash and friends): websockets
+# refuses a SOCKS proxy without it and the connection fails at handshake with
+# "connecting through a SOCKS proxy requires python-socks".
+python-socks[asyncio]>=2.4

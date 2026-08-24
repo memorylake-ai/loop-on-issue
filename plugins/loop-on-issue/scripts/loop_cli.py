@@ -640,6 +640,14 @@ def cmd_dingtalk(args):
         removed = pending_index().sweep()
         out({"swept": removed}, pretty=False)
         return 0
+    if args.action == "serve":
+        # The listener is the one part with a pip dependency, so it runs from its
+        # own virtualenv rather than whichever interpreter got us here.
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "dingtalk", "run-bot.sh")
+        if not os.path.exists(script):
+            raise CommandError("listener not found at {}".format(script))
+        os.execv("/bin/sh", ["/bin/sh", script] + list(args.extra or []))
     out({
         "configured": client.configured,
         "can_send": client.can_send,
@@ -906,7 +914,9 @@ def build_parser():
     sp.set_defaults(func=cmd_hook)
 
     sp = sub.add_parser("dingtalk", help="chat channel status and housekeeping")
-    sp.add_argument("action", nargs="?", default="status", choices=("status", "sweep"))
+    sp.add_argument("action", nargs="?", default="status",
+                    choices=("status", "sweep", "serve"))
+    sp.add_argument("extra", nargs="*", help="passed through to the listener (serve)")
     sp.set_defaults(func=cmd_dingtalk)
 
     sp = sub.add_parser("labels", help="the labels this project already defines")

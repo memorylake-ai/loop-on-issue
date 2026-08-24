@@ -154,6 +154,7 @@ def diagnose(cwd: Optional[str] = None, config: Optional[Any] = None) -> Report:
     _check_templates(report, repo, config, root)
     _check_runner(report, config)
     _check_base_branch(report, config, root)
+    _check_chat(report, config)
     return report
 
 
@@ -385,6 +386,61 @@ def _check_runner(report: Report, config: Any) -> None:
         )
     else:
         report.add("verify.command", "Verification command", OK, config.verify_command)
+
+
+def _check_chat(report: Report, config: Any) -> None:
+    """The chat channel is optional throughout, so nothing here can fail a run.
+
+    Without it a blocker still lands on the issue and the next scheduled run still
+    picks up the answer; what is lost is the minutes-instead-of-an-interval path,
+    and the ability to put work in from where the team talks.
+    """
+    from . import dingtalk as dt
+    from . import pending as pending_mod
+
+    env = dt.load_env()
+    client = dt.DingTalk(env)
+    if not client.can_send:
+        report.add(
+            "chat.configured", "Chat channel", WARN,
+            "no DingTalk configured; questions live on the issue only and wait for "
+            "the next scheduled run",
+            "write credentials to ~/.loop-on-issue/dingtalk.env — see dingtalk/README.md",
+        )
+        return
+    if not client.configured:
+        report.add(
+            "chat.configured", "Chat channel", WARN,
+            "webhook only: notifications go out, but nobody can answer in DingTalk",
+            "add DINGTALK_CLIENT_ID / DINGTALK_CLIENT_SECRET to answer from chat",
+        )
+    else:
+        report.add("chat.configured", "Chat channel", OK, "DingTalk app robot")
+
+    conv = dt.conversations(env)
+    if client.configured and not conv:
+        report.add(
+            "chat.conversations", "Chat allow-list", WARN,
+            "empty, so the listener ignores every message (deliberately fail-closed)",
+            "send `@bot /whoami` in the group and paste the conversation id in",
+        )
+    elif conv:
+        report.add("chat.conversations", "Chat allow-list", OK, ", ".join(conv))
+
+    if client.configured and not env.get("LOOP_DINGTALK_APPROVER"):
+        report.add(
+            "chat.approver", "Requirement approver", WARN,
+            "unset, so nobody can approve a requirement raised in chat",
+            "send `@bot /whoami` as the approver and paste the staffId in",
+        )
+    elif env.get("LOOP_DINGTALK_APPROVER"):
+        report.add("chat.approver", "Requirement approver", OK,
+                   env.get("LOOP_DINGTALK_APPROVER_NICK") or env["LOOP_DINGTALK_APPROVER"])
+
+    waiting = len(pending_mod.Index().all())
+    if waiting:
+        report.add("chat.pending", "Open questions", WARN,
+                   "{} question(s) waiting on a human".format(waiting), "loop dingtalk sweep")
 
 
 def _check_base_branch(report: Report, config: Any, root: str) -> None:

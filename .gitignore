@@ -2,3 +2,6 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .worktrees/
+plugins/loop-on-issue/dingtalk/.venv/
+plugins/loop-on-issue/dingtalk/bot.log
+plugins/loop-on-issue/dingtalk/bot.pid
