@@ -32,6 +32,21 @@ RUNNERS = (CLAUDE, CODEX)
 #: `perl -e alarm` exits 128 + SIGALRM when the bound expires.
 TIMEOUT_EXIT = 142
 
+#: What an unattended session runs under.
+#:
+#: `acceptEdits` is not enough and the difference is not subtle: it auto-accepts
+#: *file edits* and denies everything else, so a headless agent told to use the
+#: `loop` CLI, `git` and `gh` is refused at every one. Observed on the first real
+#: chat-raised requirement — the agent reasoned its way to three good issue
+#: drafts and could not file a single one, then exited 0.
+#:
+#: So the default is `bypassPermissions`. That is a real grant, and the reason it
+#: is defensible here is that everything downstream is bounded by design rather
+#: than by prompting: the agent runs in a per-issue worktree or a registered
+#: checkout, the skills forbid merging and closing, and nothing reaches a chat
+#: surface without a named approver. Narrow it if your situation differs.
+PERMISSION_MODE = "bypassPermissions"
+
 _RUNNER_LABEL_RE = re.compile(r"^runner::?(?P<name>[\w.-]+)$", re.IGNORECASE)
 _ID_KEY_RE = re.compile(r"(session|thread|conversation)_?id$", re.IGNORECASE)
 
@@ -51,6 +66,32 @@ def session_id(repo: Repo, number: int, generation: int = 0) -> str:
         key = "loop-issue://{}#{}".format(repo.path, number)
     else:
         key = "loop-issue://{}:{}#{}".format(repo.forge, repo.path, number)
+    if generation:
+        key += "@{}".format(generation)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
+
+def intake_session_id(request_id: str, generation: int = 0) -> str:
+    """The resumable session id for a chat-raised job.
+
+    Same reasoning as an issue's: derived, so anyone can recompute it later and
+    `claude --resume` into what the agent actually saw, rather than reading a log
+    and guessing. Without one, a job that goes wrong is only inspectable as text.
+    """
+    key = "loop-intake://{}".format(request_id)
+    if generation:
+        key += "@{}".format(generation)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
+
+def intake_session_id(request_id: str, generation: int = 0) -> str:
+    """The resumable session id for a chat-raised job.
+
+    Same reasoning as an issue's: derived, so anyone can recompute it and
+    `claude --resume` into what the agent actually saw, rather than reading a log
+    and inferring.
+    """
+    key = "loop-intake://{}".format(request_id)
     if generation:
         key += "@{}".format(generation)
     return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
@@ -102,7 +143,7 @@ def start_command(
     name: str,
     session: Optional[str],
     prompt: str,
-    permission_mode: str = "acceptEdits",
+    permission_mode: str = PERMISSION_MODE,
     sandbox: str = "workspace-write",
 ) -> List[str]:
     """The command that begins an issue's session.
@@ -132,7 +173,7 @@ def resume_command(
     name: str,
     session: Optional[str],
     prompt: str,
-    permission_mode: str = "acceptEdits",
+    permission_mode: str = PERMISSION_MODE,
     sandbox: str = "workspace-write",
 ) -> List[str]:
     """The command that continues an existing session.

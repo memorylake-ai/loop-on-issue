@@ -19,8 +19,8 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 import time
+import sys
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -32,6 +32,7 @@ from loopkit import intake as intake_mod  # noqa: E402
 from loopkit import listener as listener_mod  # noqa: E402
 from loopkit import pending, remotes  # noqa: E402
 from loopkit import repos as repos_mod  # noqa: E402
+from loopkit import runner as runner_mod  # noqa: E402
 from loopkit.forge import for_repo  # noqa: E402
 from loopkit.models import Repo  # noqa: E402
 
@@ -122,9 +123,14 @@ class Executor:
             self.notify(self._failure_text(request))
             return
 
-        request.start()
+        # Derive the session before starting, so `claude --resume <id>` can get
+        # into exactly what this agent saw. Without it a job that goes wrong is
+        # only inspectable as a log, and only by guessing.
+        session = runner_mod.intake_session_id(request.id)
+        request.start(session=session)
         self.store.save(request)
-        log.info("running %s (%s) in %s", request.id, request.kind, entry.path)
+        log.info("running %s (%s) in %s session=%s",
+                 request.id, request.kind, entry.path, session)
 
         prompt = self._prompt(request, entry)
         log_path = self.store.log_for(request.id)
@@ -132,7 +138,7 @@ class Executor:
             fh.write("\n$ {}\n".format(request.kind).encode("utf-8"))
             try:
                 proc = subprocess.run(
-                    ["claude", "-p", "--permission-mode", "acceptEdits", prompt],
+                    runner_mod.start_command("claude", session, prompt),
                     cwd=entry.path, stdout=fh, stderr=subprocess.STDOUT,
                     timeout=self.timeout,
                 )
@@ -149,15 +155,40 @@ class Executor:
                 return
 
         result = _read_text(self.store.result_for(request.id))
-        if code != 0 and not result:
-            request.fail("agent exited {}; see {}".format(code, log_path))
+        # Ask the board what exists, rather than believing the report. An agent
+        # that could not run the CLI still writes a confident-sounding summary.
+        issues = self._issues_filed(request, entry) or _issue_urls(result)
+
+        if intake_mod.produced_nothing(request.kind, issues, result):
+            request.fail(
+                "agent exited {} but produced nothing — no issues on the board and "
+                "no report. Inspect with `claude --resume {}`, or read {}".format(
+                    code, request.session, log_path))
             self.store.save(request)
             self.notify(self._failure_text(request))
             return
 
-        request.finish(issues=_issue_urls(result))
+        request.finish(issues=issues)
         self.store.save(request)
         self.notify(self._success_text(request, result))
+
+    def _issues_filed(self, request, entry):
+        """Issues carrying the queue label that appeared while this job ran.
+
+        The only trustworthy answer to "did it do the thing", and cheap: one
+        listing against the repository it was pointed at.
+        """
+        if request.kind != intake_mod.REQUIREMENT:
+            return []
+        try:
+            conf = cfg.load(entry.path)
+            forge = for_repo(remotes.detect(cwd=entry.path, forge=conf.forge, repo_path=entry.repo))
+            issues = forge.list_issues(label=conf.queue_label, state="all")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not verify what %s filed: %s", request.id, exc)
+            return []
+        started = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(request.started_at - 60))
+        return [i.url for i in issues if (i.created_at or "") >= started]
 
     def _prompt(self, request, entry):
         if request.kind == intake_mod.DEVELOP:
@@ -199,13 +230,22 @@ class Executor:
     def _success_text(self, request, result):
         head = "✅ **{}** 完成（{}）".format(
             request.id, "开发 #{}".format(request.issue) if request.issue else "需求拆分")
-        body = result.strip() if result.strip() else "（agent 没有写报告，日志：{}）".format(
-            self.store.log_for(request.id))
-        return "{}\n\n{}".format(head, body[:1800])
+        parts = [head]
+        if request.issues:
+            parts.append(listener_mod.bullets(*request.issues))
+        if result.strip():
+            parts.append(result.strip()[:1500])
+        return listener_mod.md(*parts)
 
     def _failure_text(self, request):
-        return "❌ **{}** 失败：{}\n日志：`{}`".format(
-            request.id, request.error, self.store.log_for(request.id))
+        return listener_mod.md(
+            "❌ **{}** 失败".format(request.id),
+            request.error,
+            listener_mod.bullets(
+                "日志：`{}`".format(self.store.log_for(request.id)),
+                "看它当时怎么想的：`claude --resume {}`".format(request.session or "—"),
+            ),
+        )
 
 
 def _read_text(path):

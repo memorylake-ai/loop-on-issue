@@ -266,3 +266,57 @@ class Help(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OpenQueueVisibility(Base):
+    """The queue an acknowledgement names must be the queue a command shows.
+
+    "排入队列" was answered by /ls ("empty") and /p ("none pending"), both
+    truthfully, because the request was in a third queue nothing could see.
+    """
+
+    def test_p_shows_a_request_that_is_queued_for_execution(self):
+        self.brain.handle(msg(text="做个东西", sender=self.APPROVER))  # auto-approved
+        reply = self.brain.handle(msg(text="/p", msg_id="m2"))
+        self.assertIn(self.store.all()[0].id, reply)
+        self.assertIn("排队等执行", reply)
+
+    def test_p_shows_a_running_request(self):
+        self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
+        request = self.store.all()[0]
+        request.start(session="s")
+        self.store.save(request)
+        self.assertIn("正在执行", self.brain.handle(msg(text="/p", msg_id="m2")))
+
+    def test_p_separates_waiting_for_approval_from_waiting_to_run(self):
+        self.brain.handle(msg(text="别人提的", sender="somebody"))
+        self.brain.handle(msg(text="我自己提的", msg_id="m2", sender=self.APPROVER))
+        reply = self.brain.handle(msg(text="/p", msg_id="m3"))
+        self.assertIn("待审批", reply)
+        self.assertIn("排队等执行", reply)
+
+    def test_a_finished_request_is_no_longer_open(self):
+        self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
+        request = self.store.all()[0]
+        request.start()
+        request.finish(issues=["https://f/1"])
+        self.store.save(request)
+        self.assertIn("没有在办", self.brain.handle(msg(text="/p", msg_id="m2")))
+
+    def test_an_empty_p_points_at_the_other_queue(self):
+        # Being told "empty" without being told where else to look is what made
+        # the original confusing.
+        reply = self.brain.handle(msg(text="/p"))
+        self.assertIn("/ls", reply)
+
+    def test_the_acknowledgement_names_the_command_that_can_see_it(self):
+        reply = self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
+        self.assertIn("/p", reply)
+        self.assertIn("/ls", reply)
+
+    def test_r_shows_the_resumable_session(self):
+        self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
+        request = self.store.all()[0]
+        request.start(session="abc-123")
+        self.store.save(request)
+        self.assertIn("abc-123", self.brain.handle(msg(text="/r " + request.id, msg_id="m2")))

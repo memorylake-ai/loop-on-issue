@@ -69,6 +69,10 @@ class Request:
     finished_at: float = 0.0
     issues: List[str] = field(default_factory=list)
     error: str = ""
+    #: The `claude --resume` id for the agent that ran this, derived from the
+    #: request id so it can be recomputed rather than remembered.
+    session: str = ""
+    session: str = ""
 
     # -- transitions ---------------------------------------------------------
     def _require_pending(self) -> None:
@@ -100,12 +104,21 @@ class Request:
         self.rejected_reason = reason
         return self
 
-    def start(self) -> "Request":
+    def start(self, session: str = "") -> "Request":
         self.status = RUNNING
         self.started_at = time.time()
+        if session:
+            self.session = session
         return self
 
     def finish(self, issues: Optional[List[str]] = None) -> "Request":
+        """Record a job that actually produced something.
+
+        Callers must establish that first — see `produced_nothing`. An agent that
+        exits cleanly having created nothing is a failure, and recording it as
+        success is the same mistake as reporting green from a test run that never
+        ran.
+        """
         self.status = DONE
         self.finished_at = time.time()
         self.issues = list(issues or [])
@@ -189,6 +202,39 @@ class Store:
                 self.save(request)
                 expired.append(request)
         return expired
+
+
+def produced_nothing(kind: str, issues: Optional[List[str]], report: str) -> bool:
+    """Did this job leave any evidence that it did the thing?
+
+    A clean exit is not evidence. For a decomposition that means issues on the
+    board; for developing an issue it means a written report, since the change
+    request is reported inside it.
+    """
+    if issues:
+        return False
+    if kind == DEVELOP:
+        return not (report or "").strip()
+    return True
+
+
+def produced_nothing(kind: str, issues: Optional[List[str]], report: str) -> bool:
+    """Did this job leave evidence that it did the thing it was asked to do?
+
+    A clean exit is not evidence, and treating it as such is how the first real
+    chat-raised requirement was recorded as `done` with zero issues: the agent
+    was denied permission to run the CLI, reasoned its way to three good drafts,
+    explained that it could file none of them, and exited 0.
+
+    For a decomposition the evidence is issues on the board. For developing an
+    issue it is a written report, since that job creates no issues and names its
+    change request inside the report.
+    """
+    if issues:
+        return False
+    if kind == DEVELOP:
+        return not (report or "").strip()
+    return True
 
 
 def _read(path: str) -> Optional[Request]:

@@ -113,11 +113,11 @@ with no stored state:
 
 ```bash
 cd .worktrees/loop-612 && claude -p --session-id "$SID" \
-  --permission-mode acceptEdits "<brief>"
+  --permission-mode bypassPermissions "<brief>"
 
 # resume — human answered, or the change request needs rework. The whole point.
 cd .worktrees/loop-612 && claude -p --resume "$SID" \
-  --permission-mode acceptEdits \
+  --permission-mode bypassPermissions \
   "The human answered: \"<quote>\". Continue from where you stopped."
 ```
 
@@ -154,9 +154,12 @@ cannot tell that apart from one that never started.
   the repo root it would edit the main checkout.
 - **Pass the brief only on the first call.** A resume already holds the issue, the
   plan, and everything tried; re-pasting invites a restart.
-- **Approvals must be non-interactive** or an unattended run stalls on the first
-  prompt. If runs still stall, widen the mode rather than posting a human on
-  standby.
+- **Approvals must be non-interactive**, and `acceptEdits` is not enough. It
+  auto-accepts *file edits* and denies everything else, so a session told to use
+  the `loop` CLI, `git` or `gh` is refused at every one — and exits cleanly having
+  done nothing, which is worse than failing. `bypassPermissions` is the mode that
+  works. What bounds the session is the worktree it runs in and the safety
+  boundaries below, not the permission prompt.
 
 ## Parameters
 

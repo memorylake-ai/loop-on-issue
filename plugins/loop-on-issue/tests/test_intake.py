@@ -193,3 +193,107 @@ class Expiry(unittest.TestCase):
         req.approve(by="Julian")
         self.store.save(req)
         self.assertEqual(self.store.expire_stale(ttl=3600, now=10_000), [])
+
+
+class Evidence(unittest.TestCase):
+    """A clean exit is not evidence that anything was produced."""
+
+    def test_a_decomposition_that_filed_no_issues_produced_nothing(self):
+        # The failure this exists for: an agent blocked from running the CLI
+        # exits 0, writes a thoughtful essay, and creates not one issue.
+        self.assertTrue(intake_mod.produced_nothing(
+            intake_mod.REQUIREMENT, issues=[], report="I would have filed three."))
+
+    def test_a_decomposition_with_issues_did(self):
+        self.assertFalse(intake_mod.produced_nothing(
+            intake_mod.REQUIREMENT, issues=["https://f/1"], report=""))
+
+    def test_a_development_job_is_evidenced_by_its_report(self):
+        # It creates no issues by design; the change request is named in there.
+        self.assertFalse(intake_mod.produced_nothing(
+            intake_mod.DEVELOP, issues=[], report="Opened !903."))
+
+    def test_a_development_job_with_no_report_produced_nothing(self):
+        self.assertTrue(intake_mod.produced_nothing(intake_mod.DEVELOP, issues=[], report="   "))
+
+
+class Sessions(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="loop-intake-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.store = intake_mod.Store(self.dir)
+
+    def test_starting_records_the_session(self):
+        req = intake_mod.Request(id="R1", text="x")
+        req.approve(by="Julian", auto=True)
+        req.start(session="derived-uuid")
+        self.store.save(req)
+        self.assertEqual(self.store.get("R1").session, "derived-uuid")
+
+    def test_a_session_id_is_derived_from_the_request_id(self):
+        from loopkit import runner
+
+        import uuid as _uuid
+
+        first = runner.intake_session_id("R20260824-01")
+        _uuid.UUID(first)
+        self.assertEqual(first, runner.intake_session_id("R20260824-01"))
+        self.assertNotEqual(first, runner.intake_session_id("R20260824-02"))
+
+    def test_a_generation_yields_a_fresh_session(self):
+        from loopkit import runner
+
+        self.assertNotEqual(runner.intake_session_id("R1"),
+                            runner.intake_session_id("R1", generation=1))
+
+
+class Evidence(unittest.TestCase):
+    """A clean exit is not evidence that anything was produced."""
+
+    def test_a_decomposition_that_filed_no_issues_produced_nothing(self):
+        # The real failure: an agent denied permission to run the CLI exits 0,
+        # writes a thoughtful essay, and creates not one issue.
+        self.assertTrue(intake_mod.produced_nothing(
+            intake_mod.REQUIREMENT, issues=[], report="I would have filed three."))
+
+    def test_a_decomposition_with_issues_did(self):
+        self.assertFalse(intake_mod.produced_nothing(
+            intake_mod.REQUIREMENT, issues=["https://f/1"], report=""))
+
+    def test_a_development_job_is_evidenced_by_its_report(self):
+        # It creates no issues by design; the change request is named in there.
+        self.assertFalse(intake_mod.produced_nothing(
+            intake_mod.DEVELOP, issues=[], report="Opened !903."))
+
+    def test_a_development_job_with_no_report_produced_nothing(self):
+        self.assertTrue(intake_mod.produced_nothing(intake_mod.DEVELOP, issues=[], report="   "))
+
+
+class Sessions(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="loop-intake-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.store = intake_mod.Store(self.dir)
+
+    def test_starting_records_the_session(self):
+        req = intake_mod.Request(id="R1", text="x")
+        req.approve(by="Julian", auto=True)
+        req.start(session="derived-uuid")
+        self.store.save(req)
+        self.assertEqual(self.store.get("R1").session, "derived-uuid")
+
+    def test_the_session_is_derived_from_the_request_id(self):
+        import uuid as _uuid
+
+        from loopkit import runner
+
+        first = runner.intake_session_id("R20260824-01")
+        _uuid.UUID(first)
+        self.assertEqual(first, runner.intake_session_id("R20260824-01"))
+        self.assertNotEqual(first, runner.intake_session_id("R20260824-02"))
+
+    def test_a_generation_yields_a_fresh_session(self):
+        from loopkit import runner
+
+        self.assertNotEqual(runner.intake_session_id("R1"),
+                            runner.intake_session_id("R1", generation=1))

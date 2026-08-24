@@ -350,11 +350,13 @@ class Brain:
         if auto:
             self.enqueue(request)
             return md(
-                "🚀 已受理 **{}**（审批人本人提交，**免审批**），排入队列。".format(request.id),
+                "🚀 已受理 **{}**（审批人本人提交，**免审批**），排入执行队列。".format(request.id),
                 bullets(
                     "仓库：`{}`".format(entry.repo),
+                    "看进度：`/p`，或 `/r {}` 看这一条".format(request.id),
                     "撤销：`拒绝 {} <理由>`".format(request.id),
                 ),
+                "拆完的 issue 才会出现在 `/ls` 里。",
             )
         return md(
             "📥 已受理 **{}**，待 **{}** 批准。".format(request.id, self.approver_nick),
@@ -467,19 +469,39 @@ class Brain:
     def _cmd_report(self, rest, inbound):
         return self.last_report or "还没有可重发的报告。"
 
+    #: How each open state reads to somebody who just sent a requirement. The
+    #: words matter: "排入队列" used to be answered by two commands that both
+    #: truthfully said "empty", because neither looked at the queue it meant.
+    _OPEN_LABELS = (
+        (intake_mod.PENDING, "待审批"),
+        (intake_mod.APPROVED, "已批准，排队等执行"),
+        (intake_mod.RUNNING, "正在执行"),
+    )
+
     def _cmd_p(self, rest, inbound):
-        waiting = self.store.by_status(intake_mod.PENDING)
-        if not waiting:
-            return "没有待审批的需求。"
-        return md(
-            "**待审批 {} 条**".format(len(waiting)),
-            bullets(*[
+        blocks = []
+        total = 0
+        for status, label in self._OPEN_LABELS:
+            rows = self.store.by_status(status)
+            if not rows:
+                continue
+            total += len(rows)
+            blocks.append("**{}（{}）**".format(label, len(rows)))
+            blocks.append(bullets(*[
                 "**{}** · `{}` · {} 提 — {}".format(
                     r.id, r.repo, r.requester or "?", _one_line(r.text, 60))
-                for r in waiting[:15]
-            ]),
-            "批准：`同意 <ID>` · 驳回：`拒绝 <ID> <理由>`",
-        )
+                for r in rows[:10]
+            ]))
+        if not total:
+            return md(
+                "没有在办的需求。",
+                bullets(
+                    "`/ls` 看 issue 队列（已经拆出来的活）",
+                    "直接发一句话就是提新需求",
+                ),
+            )
+        blocks.append("`/r <ID>` 看某一条 · 批准：`同意 <ID>` · 驳回：`拒绝 <ID> <理由>`")
+        return md(*blocks)
 
     def _cmd_r(self, rest, inbound):
         request = self.store.get((rest or "").strip().split(" ")[0])
@@ -489,6 +511,8 @@ class Brain:
         if request.approved_by:
             facts.append("审批：{}{}".format(
                 request.approved_by, "（本人提交免审批）" if request.auto_approved else ""))
+        if request.session:
+            facts.append("session：`{}`".format(request.session))
         if request.approval_note:
             facts.append("审批备注：{}".format(request.approval_note))
         if request.rejected_reason:
