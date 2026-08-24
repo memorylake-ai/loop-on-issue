@@ -26,7 +26,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from loopkit import ask as ask_mod  # noqa: E402
 from loopkit import config as cfg  # noqa: E402
+from loopkit import dingtalk as dt_mod  # noqa: E402
+from loopkit import pending  # noqa: E402
 from loopkit import doctor as doctor_mod  # noqa: E402
 from loopkit import remotes, runner as runner_mod, scaffold  # noqa: E402
 from loopkit import state as state_mod  # noqa: E402
@@ -56,6 +59,25 @@ def read_text(inline, path):
     if path:
         return sys.stdin.read() if path == "-" else open(path).read()
     return inline or ""
+
+
+def notifier(dry_run: bool = False):
+    """A `(title, text) -> pqk|None` callable, or None when nothing is configured.
+
+    Returning None rather than raising is deliberate: DingTalk is an accelerant,
+    not the channel. The issue comment is what has to work.
+    """
+    env = dt_mod.load_env()
+    client = dt_mod.DingTalk(env)
+    if not client.can_send:
+        return None
+    if dry_run:
+        return lambda title, text: None
+    return client.send
+
+
+def pending_index():
+    return pending.Index(os.environ.get("LOOP_PENDING_DIR") or None)
 
 
 class Ctx:
@@ -243,8 +265,26 @@ def cmd_claim(args):
         raise Precondition("#{} claim did not stick (now {}); another run won".format(args.id, after))
 
     name = runner_mod.select(None, issue.labels, ctx.config.runner)
+    session = resumable_id(ctx.repo, args.id, name)
+
+    # Record ownership on the board. From here the issue — not a derivation rule
+    # — is what says which session holds this work, which is what lets a later
+    # run, another machine, or a human read it back without recomputing anything.
+    ctx.forge.add_issue_comment(
+        args.id,
+        state_mod.stamp(
+            "Claimed for the `{}` runner.{}".format(
+                name,
+                "" if session else
+                "\n\n_This runner assigns its own session id at start; it is recorded "
+                "by `loop session-record` as soon as the session exists._",
+            ),
+            session=session,
+            runner=name,
+        ),
+    )
     out({"id": args.id, "state": "CLAIMED", "title": after_base, "runner": name,
-         "session_id": resumable_id(ctx.repo, args.id, name)}, pretty=False)
+         "session_id": session}, pretty=False)
     return 0
 
 
@@ -395,30 +435,129 @@ def cmd_cr_feedback(args):
     return 0 if has else PRECONDITION
 
 
+def cmd_ask(args):
+    """Put a question to a human, on the issue and — if configured — in chat."""
+    ctx = Ctx(args)
+    question = read_text(args.question, args.question_file).strip()
+    if not question:
+        raise Precondition("empty question")
+    options = list(args.option or [])
+    wait = args.wait if args.wait is not None else ctx.config.ask_wait
+
+    if args.dry_run:
+        out({"dry_run": True, "id": args.id, "question": question, "options": options,
+             "wait": wait, "body": ask_mod.question_body(question, options)})
+        return 0
+
+    result = ask_mod.ask(
+        ctx.forge, ctx.repo.path, args.id, question,
+        options=options, wait=wait, notify=notifier(), index=pending_index(),
+    )
+    if args.json:
+        out(result.as_dict())
+    elif result.answered:
+        print(result.answer.raw)
+    else:
+        print("asked on #{} — nobody has answered yet: {}".format(args.id, result.url),
+              file=sys.stderr)
+    if result.notify_error:
+        print("note: could not reach the chat channel ({}); the question is on the "
+              "issue regardless".format(result.notify_error), file=sys.stderr)
+    return 0 if result.answered else PRECONDITION
+
+
+def cmd_report(args):
+    """Write a run's outcome to both surfaces.
+
+    Each issue the run touched gets its own note, and the group gets the summary.
+    Both are written to stand alone: the group message never says "see the issue",
+    and the issue comment never says "see the group".
+    """
+    raw = read_text(None, args.json_file)
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise CommandError("report input is not valid JSON: {}".format(exc))
+    if not isinstance(payload, dict):
+        raise CommandError("report input must be a JSON object")
+
+    ctx = Ctx(args)
+    notes = payload.get("notes") or {}
+    written = []
+    for key, note in notes.items():
+        if not str(note).strip():
+            continue
+        number = int(key)
+        ctx.forge.add_issue_comment(number, state_mod.stamp(str(note).strip()))
+        written.append(number)
+
+    summary = (payload.get("summary") or "").strip()
+    notified = False
+    notify_error = ""
+    send = notifier(args.dry_run)
+    if summary and send is not None:
+        try:
+            title = payload.get("title") or "loop 运行报告"
+            notified = send(title, dt_mod.report_card(title, summary)) is not None
+        except Exception as exc:  # noqa: BLE001
+            notify_error = str(exc)
+
+    result = {"notes_written": written, "notified": notified, "notify_error": notify_error or None}
+    if args.json:
+        out(result)
+    else:
+        print("wrote {} issue note(s); group: {}".format(
+            len(written), "sent" if notified else (notify_error or "not configured")))
+    return 0
+
+
+def cmd_dingtalk(args):
+    env = dt_mod.load_env()
+    client = dt_mod.DingTalk(env)
+    if args.action == "sweep":
+        removed = pending_index().sweep()
+        out({"swept": removed}, pretty=False)
+        return 0
+    out({
+        "configured": client.configured,
+        "can_send": client.can_send,
+        "robot_code": client.robot_code or None,
+        "conversations": dt_mod.conversations(env),
+        "approver": env.get("LOOP_DINGTALK_APPROVER") or None,
+        "env_paths": dt_mod.default_env_paths(),
+        "open_questions": len(pending_index().all()),
+    })
+    return 0
+
+
 # --------------------------------------------------------------------------- #
 # sessions
 # --------------------------------------------------------------------------- #
 
 
 def cmd_session_id(args):
+    """The id to resume this issue with — asking the board before deriving one."""
     ctx = Ctx(args)
     issue = ctx.forge.get_issue(args.id)
-    name = runner_mod.select(args.runner, issue.labels, ctx.config.runner)
+    comments = ctx.forge.list_issue_comments(args.id)
+    marker = state_mod.latest_marker(comments) or {}
+    name = runner_mod.select(args.runner, issue.labels, ctx.config.runner, recorded=marker.get("runner"))
+
+    recorded = state_mod.latest_session(comments)
+    if recorded and recorded.get("session") and not args.generation:
+        # What the board says wins. A derivation that disagreed with a recorded id
+        # would resume into a session nothing ever wrote to.
+        print(recorded["session"])
+        return 0
 
     if name == runner_mod.CLAUDE:
         print(runner_mod.session_id(ctx.repo, args.id, args.generation))
         return 0
 
-    # Codex assigns its own thread id, so the only record is what a previous run
-    # wrote into a marker comment.
-    recorded = state_mod.latest_session(ctx.forge.list_issue_comments(args.id))
-    if not recorded or not recorded.get("session"):
-        raise Precondition(
-            "no {} session recorded for #{}; start a fresh one and record its id "
-            "with `loop session-record`".format(name, args.id)
-        )
-    print(recorded["session"])
-    return 0
+    raise Precondition(
+        "no {} session recorded for #{}; start a fresh one and record its id "
+        "with `loop session-record`".format(name, args.id)
+    )
 
 
 def cmd_session_record(args):
@@ -619,6 +758,30 @@ def build_parser():
     sp.add_argument("--session", required=True)
     sp.add_argument("--runner", choices=runner_mod.RUNNERS)
     sp.set_defaults(func=cmd_session_record)
+
+    sp = sub.add_parser("ask", help="put a question to a human, on the issue and in chat")
+    sp.add_argument("--id", "--iid", type=int, required=True, dest="id")
+    g = sp.add_mutually_exclusive_group(required=True)
+    g.add_argument("--question")
+    g.add_argument("--question-file", help="path, or - for stdin")
+    sp.add_argument("--option", action="append",
+                    help="repeatable; answering with its number selects it")
+    sp.add_argument("--wait", type=int,
+                    help="seconds to wait for an answer (default: ask_wait, normally 0)")
+    sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_ask)
+
+    sp = sub.add_parser("report", help="write a run's outcome to the issues and the group")
+    sp.add_argument("--json-file", default="-",
+                    help='path, or - for stdin: {"summary": "...", "notes": {"612": "..."}}')
+    sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_report)
+
+    sp = sub.add_parser("dingtalk", help="chat channel status and housekeeping")
+    sp.add_argument("action", nargs="?", default="status", choices=("status", "sweep"))
+    sp.set_defaults(func=cmd_dingtalk)
 
     sp = sub.add_parser("labels", help="the labels this project already defines")
     sp.add_argument("--json", action="store_true")

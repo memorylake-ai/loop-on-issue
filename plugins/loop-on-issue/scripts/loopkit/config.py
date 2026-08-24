@@ -59,16 +59,31 @@ DEFAULTS: Dict[str, Any] = {
     "env_files": [".env"],
     # Optional command for reaching a human faster than the next scheduled run.
     # Null means the issue thread is the only channel, which always works.
+    # The built-in DingTalk channel does not go through here; this stays for
+    # anyone wanting Slack, Feishu, or a pager.
     "escalation_command": None,
+    # How long `loop ask` waits for an answer before giving up and letting the
+    # issue pause. Zero keeps the swarm's rule that a session never blocks on a
+    # human; the interactive hook overrides it with a short window.
+    "ask_wait": 0,
+    # Label put on an issue that carries a requirement raised in chat. Such an
+    # issue is never queued, so the swarm cannot claim it.
+    "intake_label": "intake",
+    # Who decomposes an approved requirement: "routine" leaves it for the next
+    # scheduled run (the listener stays stateless), "immediate" has the listener
+    # spawn one headless agent right away.
+    "creator_mode": "routine",
 }
 
 _ENUMS = {
     "forge": ("auto", "github", "gitlab"),
     "runner": ("claude", "codex"),
     "template_lang": ("en", "zh"),
+    "creator_mode": ("routine", "immediate"),
 }
 
 _POSITIVE_INTS = ("max_parallel", "session_timeout")
+_NON_NEGATIVE_INTS = ("ask_wait",)
 _LISTS = ("env_files",)
 _STRINGS = (
     "queue_label",
@@ -76,6 +91,7 @@ _STRINGS = (
     "push_remote",
     "target_remote",
     "worktree_dir",
+    "intake_label",
 )
 
 
@@ -133,6 +149,10 @@ class Config:
             value = self.data.get(key)
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ConfigError("{!r} must be a positive integer, got {!r}".format(key, value))
+        for key in _NON_NEGATIVE_INTS:
+            value = self.data.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ConfigError("{!r} must be a non-negative integer, got {!r}".format(key, value))
         for key in _LISTS:
             value = self.data.get(key)
             if not isinstance(value, list) or any(not isinstance(v, str) for v in value):

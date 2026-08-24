@@ -51,8 +51,15 @@ MARKER_NAME = "loop-on-issue:agent"
 #: comment from a human reply, and every PAUSED issue on it would stop waking up.
 LEGACY_MARKERS = ("<!-- loop-swarm-agent -->",)
 
+#: Stamped on a comment the tooling posts *on a human's behalf* — an answer given
+#: in DingTalk, mirrored onto the issue. Deliberately a different name from the
+#: agent marker: `unanswered` must still see it as a human reply, or an answer
+#: relayed from chat would never wake the issue it answers.
+RELAY_NAME = "loop-on-issue:relay"
+
 _MARKER_RE = re.compile(r"<!--\s*" + re.escape(MARKER_NAME) + r"(?P<attrs>[^>]*?)-->")
-_ATTR_RE = re.compile(r"(\w+)=([^\s]+)")
+_RELAY_RE = re.compile(r"<!--\s*" + re.escape(RELAY_NAME) + r"(?P<attrs>[^>]*?)-->\s*\n?")
+_ATTR_RE = re.compile(r"(\w+)=(\S+)")
 
 
 # --------------------------------------------------------------------------- #
@@ -131,6 +138,40 @@ def parse_marker(body: str) -> Optional[Dict[str, str]]:
     return dict(_ATTR_RE.findall(m.group("attrs")))
 
 
+def relay(text: str, by: str = None, via: str = "dingtalk") -> str:
+    """Wrap an answer a human gave somewhere else, for posting onto the issue.
+
+    The visible line names who said it, because six weeks later the issue is the
+    only record that a decision was made and by whom.
+    """
+    attrs = ""
+    if by:
+        attrs += " by={}".format(_slugish(by))
+    if via:
+        attrs += " via={}".format(via)
+    who = "**{}** 在 {} 回答：".format(by, via) if by else "在 {} 收到的回答：".format(via)
+    return "<!-- {}{} -->\n{}\n\n{}".format(RELAY_NAME, attrs, who, text.strip())
+
+
+def parse_relay(body: str) -> Tuple[Optional[Dict[str, str]], str]:
+    """`(attributes, the answer text)`, or `(None, body)` when it is not a relay."""
+    m = _RELAY_RE.search(body or "")
+    if not m:
+        return None, body or ""
+    attrs = dict(_ATTR_RE.findall(m.group("attrs")))
+    rest = (body[: m.start()] + body[m.end():]).strip()
+    # Drop the human-facing attribution line the relay adds above the answer.
+    lines = rest.split("\n")
+    if lines and ("回答：" in lines[0]):
+        rest = "\n".join(lines[1:]).strip()
+    return attrs, rest
+
+
+def _slugish(value: str) -> str:
+    """Attribute values are whitespace-delimited, so a nickname cannot carry one."""
+    return re.sub(r"\s+", "_", value.strip())
+
+
 # --------------------------------------------------------------------------- #
 # reading a comment thread
 # --------------------------------------------------------------------------- #
@@ -152,6 +193,23 @@ def unanswered(comments: Sequence[Comment]) -> List[Comment]:
         for c in human
         if not is_agent_note(c.body) and (last_agent is None or c.created_at > last_agent)
     ]
+
+
+def latest_marker(comments: Sequence[Comment]) -> Optional[Dict[str, str]]:
+    """Attributes from the newest agent marker carrying any, if there are any.
+
+    Used to read back what the board says about an issue — which runner holds it,
+    and which session — without recomputing anything.
+    """
+    best = None
+    best_at = None
+    for c in comments:
+        attrs = parse_marker(c.body)
+        if not attrs:
+            continue
+        if best_at is None or c.created_at > best_at:
+            best, best_at = attrs, c.created_at
+    return best
 
 
 def latest_session(comments: Sequence[Comment]) -> Optional[Dict[str, str]]:

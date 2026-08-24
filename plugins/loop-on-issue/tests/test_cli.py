@@ -208,6 +208,9 @@ class ChangeRequestStatus(CLITest):
 
 class Sessions(CLITest):
     def test_claude_session_ids_are_derived(self):
+        # session-id now reads the board before deriving, so the comment thread
+        # has to be answerable even when it is empty.
+        self.cli.route("api", "/issues/12/comments", stdout=[])
         self.cli.route("api", "/issues/12", stdout=self.issue())
         code, stdout, _ = self.run_cli("session-id", "--id", "12")
         self.assertEqual(code, 0)

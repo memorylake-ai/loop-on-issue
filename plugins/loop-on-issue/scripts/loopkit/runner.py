@@ -56,14 +56,25 @@ def session_id(repo: Repo, number: int, generation: int = 0) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
 
-def select(explicit: Optional[str], labels: Sequence[str], configured: Optional[str]) -> str:
+def select(
+    explicit: Optional[str],
+    labels: Sequence[str],
+    configured: Optional[str],
+    recorded: Optional[str] = None,
+) -> str:
     """Which runner develops this issue.
 
-    Explicit request, then a `runner::codex` label on the issue itself (so a human
-    can route one issue differently without touching config), then config, then
-    claude. An unrecognised *label* is ignored rather than obeyed — a typo should
-    not silently change which agent does the work — but an unrecognised explicit
-    request is an error, because somebody typed it on purpose.
+    Precedence: an explicit request, then whatever the board says is *already*
+    running this issue, then a `runner::codex` label (so a human can route a new
+    issue without touching config), then config, then claude.
+
+    The recorded runner outranks the label on purpose: once a session holds this
+    issue's context, switching runners mid-issue strands it — the label is a
+    routing preference for work not yet started, not a live override.
+
+    An unrecognised *label* is ignored rather than obeyed, since a typo should not
+    silently change which agent does the work; an unrecognised explicit request is
+    an error, because somebody typed it deliberately.
     """
     if explicit:
         if explicit not in RUNNERS:
@@ -71,6 +82,8 @@ def select(explicit: Optional[str], labels: Sequence[str], configured: Optional[
                 "unknown runner {!r}; expected one of {}".format(explicit, ", ".join(RUNNERS))
             )
         return explicit
+    if recorded in RUNNERS:
+        return recorded
     for label in labels or []:
         m = _RUNNER_LABEL_RE.match(label.strip())
         if m and m.group("name").lower() in RUNNERS:
