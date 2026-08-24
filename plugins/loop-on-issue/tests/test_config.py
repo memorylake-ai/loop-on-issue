@@ -16,6 +16,7 @@ class Defaults(unittest.TestCase):
             "forge", "repo", "queue_label", "assignee", "base_branch", "push_remote",
             "target_remote", "runner", "max_parallel", "session_timeout", "worktree_dir",
             "template_lang", "verify_command", "env_files", "escalation_command",
+            "ask_wait", "intake_ttl",
         ):
             self.assertIn(key, c.data, key)
 

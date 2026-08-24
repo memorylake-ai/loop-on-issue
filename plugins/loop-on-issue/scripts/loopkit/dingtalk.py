@@ -83,6 +83,23 @@ def load_env(paths: Optional[List[str]] = None, environ: Optional[Dict[str, str]
     return result
 
 
+def enabled(env: Dict[str, str]) -> bool:
+    """Is the chat bot switched on?
+
+    The whole feature is optional, and turning it off has to be one edit rather
+    than an uninstall — the switch is read on every call, so a running session
+    picks it up without restarting anything.
+
+    Unset means **on when credentials exist**: somebody who configured the bot
+    meant to use it, and requiring a second opt-in only produces a bot that
+    silently does nothing.
+    """
+    raw = (env.get("LOOP_DINGTALK_ENABLED") or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
 def dm_users(env: Dict[str, str]) -> List[str]:
     """staffIds to send a card to one-to-one.
 
@@ -102,6 +119,26 @@ def conversations(env: Dict[str, str]) -> List[str]:
     """
     raw = (env.get("LOOP_DINGTALK_CONVERSATIONS") or "").strip()
     return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def set_enabled(path: str, on: bool) -> str:
+    """Flip the switch in place, creating the file if it does not exist yet."""
+    import os as _os
+
+    lines = []
+    if _os.path.isfile(path):
+        with open(path) as fh:
+            lines = [line for line in fh.read().splitlines()
+                     if not line.strip().startswith("LOOP_DINGTALK_ENABLED")]
+    else:
+        directory = _os.path.dirname(path)
+        if directory:
+            _os.makedirs(directory, exist_ok=True)
+    lines.append('LOOP_DINGTALK_ENABLED="{}"'.format("1" if on else "0"))
+    fd = _os.open(path, _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)
+    with _os.fdopen(fd, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return path
 
 
 def sign_webhook(url: str, secret: str, timestamp_ms: Optional[int] = None) -> str:
@@ -140,7 +177,13 @@ class DingTalk:
         return bool(self.env.get("DINGTALK_CLIENT_ID") and self.env.get("DINGTALK_CLIENT_SECRET"))
 
     @property
+    def enabled(self) -> bool:
+        return enabled(self.env)
+
+    @property
     def can_send(self) -> bool:
+        if not self.enabled:
+            return False
         return self.configured or bool(self.env.get("LOOP_DINGTALK_WEBHOOK"))
 
     @property

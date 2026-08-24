@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -27,37 +28,198 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 
 from loopkit import config as cfg  # noqa: E402
 from loopkit import dingtalk as dt_mod  # noqa: E402
+from loopkit import intake as intake_mod  # noqa: E402
 from loopkit import listener as listener_mod  # noqa: E402
 from loopkit import pending, remotes  # noqa: E402
+from loopkit import repos as repos_mod  # noqa: E402
 from loopkit.forge import for_repo  # noqa: E402
+from loopkit.models import Repo  # noqa: E402
 
 log = logging.getLogger("loop-bot")
 
 
-def build_brain(env, repo_root, spawn=None):
+def load_registry(repo_root: str) -> repos_mod.Registry:
+    """Which repositories this bot serves.
+
+    The registry is machine-level, because a bot taking requirements in chat has
+    to know about several before it knows which one a request belongs to. With no
+    registry at all it falls back to the checkout it was started in, so a
+    single-repo setup needs no configuration.
+    """
+    registry = repos_mod.Registry.load()
+    if registry.names():
+        return registry
     conf = cfg.load(repo_root)
     repo = remotes.detect(cwd=repo_root, forge=conf.forge, repo_path=conf.repo)
-    forges = {}
+    registry.add(repo.name, repo.path, repo_root)
+    registry.set_default(repo.name)
+    return registry
 
-    def forge_for(path):
-        if path not in forges:
-            target = repo if path == repo.path else remotes.Repo(repo.forge, repo.host, path)
-            forges[path] = for_repo(target)
-        return forges[path]
 
-    return listener_mod.Brain(
-        forge_for=forge_for,
-        default_repo=repo.path,
-        index=pending.Index(),
-        conversations=dt_mod.conversations(env),
-        approver=env.get("LOOP_DINGTALK_APPROVER") or "",
-        approver_nick=env.get("LOOP_DINGTALK_APPROVER_NICK") or "",
-        queue_label=conf.queue_label,
-        intake_label=conf.intake_label,
-        assignee=conf.assignee,
-        creator_mode=conf.creator_mode,
-        spawn_creator=spawn,
-    ), conf, repo
+def forge_factory(registry: repos_mod.Registry):
+    """Resolve a project path to a forge client, caching per repository."""
+    cache = {}
+
+    def forge_for(path: str):
+        if path not in cache:
+            entry = registry.get(path)
+            root = entry.path if entry else os.getcwd()
+            conf = cfg.load(root)
+            cache[path] = for_repo(
+                remotes.detect(cwd=root, forge=conf.forge, repo_path=path or conf.repo)
+            )
+        return cache[path]
+
+    return forge_for
+
+
+class Executor:
+    """Runs approved work, one job at a time.
+
+    Serial on purpose. Two agents in the same checkout fight over git state, and
+    two anywhere compete for the same quota; decomposing a requirement is not
+    urgent enough to be worth either. Jobs are durable in the intake store, so a
+    listener that dies mid-queue picks up where it left off.
+    """
+
+    def __init__(self, store, registry, notify, timeout=7200):
+        self.store = store
+        self.registry = registry
+        self.notify = notify
+        self.timeout = timeout
+        self.queue = __import__("queue").Queue()
+        self._thread = None
+
+    def start(self):
+        import threading
+
+        # Anything approved but never run — a crash, a restart — goes back in.
+        for request in self.store.by_status(intake_mod.APPROVED, intake_mod.RUNNING):
+            log.info("recovering %s (%s)", request.id, request.status)
+            self.queue.put(request.id)
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def submit(self, request):
+        self.queue.put(request.id)
+
+    def _worker(self):
+        while True:
+            request_id = self.queue.get()
+            try:
+                self._run(request_id)
+            except Exception:  # noqa: BLE001 - one bad job must not stop the queue
+                log.exception("job %s failed", request_id)
+
+    def _run(self, request_id):
+        request = self.store.get(request_id)
+        if not request or request.status not in (intake_mod.APPROVED, intake_mod.RUNNING):
+            return
+        entry = self.registry.get(request.repo)
+        if not entry or not os.path.isdir(entry.path):
+            request.fail("no local checkout registered for {}".format(request.repo))
+            self.store.save(request)
+            self.notify(self._failure_text(request))
+            return
+
+        request.start()
+        self.store.save(request)
+        log.info("running %s (%s) in %s", request.id, request.kind, entry.path)
+
+        prompt = self._prompt(request, entry)
+        log_path = self.store.log_for(request.id)
+        with open(log_path, "ab") as fh:
+            fh.write("\n$ {}\n".format(request.kind).encode("utf-8"))
+            try:
+                proc = subprocess.run(
+                    ["claude", "-p", "--permission-mode", "acceptEdits", prompt],
+                    cwd=entry.path, stdout=fh, stderr=subprocess.STDOUT,
+                    timeout=self.timeout,
+                )
+                code = proc.returncode
+            except subprocess.TimeoutExpired:
+                request.fail("timed out after {}s".format(self.timeout))
+                self.store.save(request)
+                self.notify(self._failure_text(request))
+                return
+            except OSError as exc:
+                request.fail(str(exc))
+                self.store.save(request)
+                self.notify(self._failure_text(request))
+                return
+
+        result = _read_text(self.store.result_for(request.id))
+        if code != 0 and not result:
+            request.fail("agent exited {}; see {}".format(code, log_path))
+            self.store.save(request)
+            self.notify(self._failure_text(request))
+            return
+
+        request.finish(issues=_issue_urls(result))
+        self.store.save(request)
+        self.notify(self._success_text(request, result))
+
+    def _prompt(self, request, entry):
+        if request.kind == intake_mod.DEVELOP:
+            return (
+                "Use the loop-issue-swarm skill, but work **only** issue #{n} of {repo} "
+                "and nothing else — do not scan or claim anything from the queue.\n\n"
+                "Take it through the skill's normal cycle: triage, worktree, plan, code, "
+                "review, and submit the change request. Honour every safety boundary the "
+                "skill states, in particular: never merge and never close the issue.\n\n"
+                "When you are done, write a short report to `{result}` — what you did, the "
+                "change request URL, and anything a human still has to decide. That file is "
+                "what gets sent back to the person who asked, so make it readable on its "
+                "own."
+            ).format(n=request.issue, repo=entry.repo, result=self.store.result_for(request.id))
+
+        return (
+            "Use the loop-issue-creator skill to decompose the requirement below into "
+            "queue-ready issues in {repo}.\n\n"
+            "The requirement, verbatim — this is the source of scope, and nothing outside "
+            "it gets built:\n\n{text}\n\n"
+            "Raised by: {who}\n{note}"
+            "Ground every slice in code you actually read, and draft before you create. "
+            "Nobody is at a keyboard: confirm the draft with `loop ask` and give it real "
+            "options, or if the requirement is unambiguous enough, proceed and say in the "
+            "report that you did.\n\n"
+            "When you are done, write a short report to `{result}` listing each issue you "
+            "created with its URL and one line on what it covers, plus anything you "
+            "deliberately did not file. That file is what gets sent back to the person who "
+            "asked, so make it readable on its own."
+        ).format(
+            repo=entry.repo,
+            text="\n".join("> " + line for line in request.text.splitlines()),
+            who=request.requester or "unknown",
+            note=("Approval note, which carries the same weight as the requirement "
+                  "itself: {}\n\n".format(request.approval_note)) if request.approval_note else "",
+            result=self.store.result_for(request.id),
+        )
+
+    def _success_text(self, request, result):
+        head = "✅ **{}** 完成（{}）".format(
+            request.id, "开发 #{}".format(request.issue) if request.issue else "需求拆分")
+        body = result.strip() if result.strip() else "（agent 没有写报告，日志：{}）".format(
+            self.store.log_for(request.id))
+        return "{}\n\n{}".format(head, body[:1800])
+
+    def _failure_text(self, request):
+        return "❌ **{}** 失败：{}\n日志：`{}`".format(
+            request.id, request.error, self.store.log_for(request.id))
+
+
+def _read_text(path):
+    try:
+        with open(path) as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def _issue_urls(text):
+    import re as _re
+
+    return _re.findall(r"https?://\S+?/(?:issues|-/issues)/\d+", text or "")
 
 
 def inbound_from(data: dict) -> listener_mod.Inbound:
@@ -94,34 +256,23 @@ def reply(session_webhook: str, text: str) -> None:
         log.warning("could not reply into the conversation: %s", exc)
 
 
-def make_spawn(repo_root: str, conf):
-    """Run the creator on an approved intake issue, in the background.
-
-    Only used when `creator_mode` is "immediate". The default leaves this to the
-    next scheduled run, which is what keeps the listener stateless and therefore
-    safe to restart at any moment.
-    """
-    def spawn(number: int) -> str:
-        prompt = (
-            "Use the loop-issue-creator skill. Decompose the requirement in issue "
-            "#{n} of this repository into queue-ready issues, passing --epic {n} so "
-            "each slice links back. The requirement text is the issue body; the "
-            "approval and any approval note are in its comments and carry the same "
-            "weight as the requirement itself. When the draft is ready, use "
-            "`loop ask --id {n}` to get it confirmed before creating anything."
-        ).format(n=number)
-        cmd = ["claude", "-p", "--permission-mode", "acceptEdits", prompt]
-        if conf.runner == "codex":
-            cmd = ["codex", "exec", "--json", "--sandbox", "workspace-write",
-                   "-c", 'approval_policy="never"', prompt]
-        log_path = os.path.join(repo_root, ".loop-on-issue", "creator-{}.log".format(number))
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        with open(log_path, "ab") as fh:
-            subprocess.Popen(cmd, cwd=repo_root, stdout=fh, stderr=subprocess.STDOUT,
-                             start_new_session=True)
-        return "已在后台开始拆分（日志 `{}`）。".format(os.path.relpath(log_path, repo_root))
-
-    return spawn
+def make_brain(env, repo_root, enqueue=None):
+    registry = load_registry(repo_root)
+    conf = cfg.load(repo_root)
+    store = intake_mod.Store()
+    brain = listener_mod.Brain(
+        forge_for=forge_factory(registry),
+        registry=registry,
+        index=pending.Index(),
+        store=store,
+        conversations=dt_mod.conversations(env),
+        approver=env.get("LOOP_DINGTALK_APPROVER") or "",
+        approver_nick=env.get("LOOP_DINGTALK_APPROVER_NICK") or "",
+        queue_label=conf.queue_label,
+        assignee=conf.assignee,
+        enqueue=enqueue,
+    )
+    return brain, registry, store, conf
 
 
 def run(env, repo_root):
@@ -132,9 +283,28 @@ def run(env, repo_root):
               "manages its own virtualenv.", file=sys.stderr)
         return 1
 
-    brain, conf, repo = build_brain(env, repo_root, spawn=make_spawn(repo_root, cfg.load(repo_root)))
-    if conf.creator_mode != "immediate":
-        brain.spawn_creator = None
+    client_out = dt_mod.DingTalk(env)
+
+    def announce(text):
+        """Say something into the configured conversation, unprompted.
+
+        Used when a job finishes: whoever asked has long since stopped watching
+        the thread their request came from.
+        """
+        try:
+            client_out.send("loop", text)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not announce: %s", exc)
+
+    brain, registry, store, conf = make_brain(env, repo_root)
+    executor = Executor(store, registry, announce)
+    brain.enqueue = executor.submit
+    executor.start()
+
+    expired = store.expire_stale(conf.intake_ttl)
+    if expired:
+        log.info("expired %d request(s) nobody decided on", len(expired))
+
     dedupe = listener_mod.Dedupe()
 
     if not brain.conversations:
@@ -154,7 +324,7 @@ def run(env, repo_root):
                      inbound.conversation_id, inbound.sender_nick, inbound.sender_id,
                      (inbound.pqk or "")[:12], inbound.text[:120])
             # At-least-once delivery: a reconnect redelivers the same id, and
-            # acting twice on a bare reply answers the wrong question.
+            # acting twice on an approval would start the same job twice.
             if inbound.msg_id and dedupe.seen(inbound.msg_id):
                 log.info("duplicate delivery %s ignored", inbound.msg_id)
                 return AckMessage.STATUS_OK, "duplicate"
@@ -167,14 +337,14 @@ def run(env, repo_root):
                 reply(inbound.session_webhook, answer)
             return AckMessage.STATUS_OK, "OK"
 
-    client = DingTalkStreamClient(
+    stream = DingTalkStreamClient(
         Credential(env.get("DINGTALK_CLIENT_ID"), env.get("DINGTALK_CLIENT_SECRET"))
     )
-    client.register_callback_handler(ChatbotMessage.TOPIC, Handler())
-    log.info("connecting: repo=%s conversations=%s approver=%s creator_mode=%s",
-             repo.path, brain.conversations or "(none)",
-             brain.approver_nick, conf.creator_mode)
-    client.start_forever()
+    stream.register_callback_handler(ChatbotMessage.TOPIC, Handler())
+    log.info("connecting: repos=%s default=%s conversations=%s approver=%s",
+             registry.names(), registry.default and registry.default.repo,
+             brain.conversations or "(none)", brain.approver_nick)
+    stream.start_forever()
     return 0
 
 
@@ -187,7 +357,7 @@ def simulate(env, repo_root, text, sender="sim-user", nick="模拟用户", conve
 
     It is not a dry run — a command that writes to the board writes to it.
     """
-    brain, _, _ = build_brain(env, repo_root)
+    brain, _, _, _ = make_brain(env, repo_root)
     conversations = dt_mod.conversations(env)
     inbound = listener_mod.Inbound(
         msg_id="sim-{}".format(int(time.time() * 1000)),
@@ -223,11 +393,23 @@ def selftest(env, repo_root) -> int:
     except ImportError:
         bad += line(False, "dingtalk-stream", "not installed (run-bot.sh installs it)")
     try:
-        _, conf, repo = build_brain(env, repo_root)
-        bad += line(True, "repository", "{} · {}".format(repo.forge, repo.path))
+        registry = load_registry(repo_root)
+        bad += line(bool(registry.names()), "repositories",
+                    ", ".join("{}→{}".format(e.name, e.repo) for e in registry.all()) or "none")
+        default = registry.default
+        bad += line(default is not None, "default repository",
+                    default.repo if default else "unset — a bare requirement cannot be routed")
+        for entry in registry.all():
+            bad += line(os.path.isdir(entry.path), "checkout {}".format(entry.name), entry.path)
+        conf = cfg.load(repo_root)
         bad += line(bool(conf.assignee), "assignee", conf.assignee or "unset")
     except Exception as exc:  # noqa: BLE001
-        bad += line(False, "repository", str(exc))
+        bad += line(False, "repositories", str(exc))
+    store = intake_mod.Store()
+    waiting = store.by_status(intake_mod.PENDING)
+    print("· {:<32} {}".format("requests awaiting approval", len(waiting)))
+    bad += line(bool(shutil.which("claude")), "claude CLI",
+                shutil.which("claude") or "not on PATH — approved work cannot run")
     if client.configured:
         try:
             client.access_token()

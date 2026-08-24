@@ -95,9 +95,10 @@ invents a plausible one and can report green from a run that tested nothing).
 | `/loop-on-issue:issues` | `loop-issue-creator` | decompose a requirement into executable issues |
 | `/loop-on-issue:swarm` | `loop-issue-swarm` | run one pass over the queue |
 | `/loop-on-issue:mr` | `forge-mr` | take this branch to a submitted PR/MR |
+| `/loop-on-issue:init-dingtalk-bot` | `dingtalk-bot` | set up, operate or switch off the optional chat bot |
 
-Codex has no slash commands; the four skills carry the same logic and activate
-from the same phrasings, in English or Chinese.
+Codex has no slash commands; the five skills carry the same logic and activate from
+the same phrasings, in English or Chinese.
 
 ## The `loop` CLI
 
@@ -124,7 +125,9 @@ loop create --title "…" --body-file - [--blocked-by 613] [--epic 600] [--dry-r
 
 loop ask --id 612 --question "…" [--option A --option B] [--wait 120]
 loop report --json-file -                # {"summary": "...", "notes": {"612": "..."}}
-loop dingtalk [status|sweep|serve]
+loop dingtalk [status|enable|disable|sweep|serve]
+loop repos [list|add|remove|default] …    # repositories the chat bot serves
+loop intake [list|sweep] [--id R…]        # requirements awaiting a decision
 ```
 
 Exit codes are load-bearing: **0** success, **2** precondition not met (a routine
@@ -171,31 +174,58 @@ window, and feeds the answer back to the model. Nothing answers within the windo
 and the session is told to pause, which is where it would have ended up anyway.
 Outside a loop session the hook does nothing and the tool behaves normally.
 
-## Chat channel (DingTalk)
+## Chat channel (DingTalk) — optional
 
-Entirely optional — see [`plugins/loop-on-issue/dingtalk/README.md`](plugins/loop-on-issue/dingtalk/README.md)
-for setup. It has exactly three jobs:
+Off unless you set it up, and switchable off again at any time:
+
+```
+/loop-on-issue:init-dingtalk-bot     # guided setup
+loop dingtalk disable                # and back on with `enable`
+```
+
+Disabled, the plugin behaves exactly as one that never had the feature — the
+`AskUserQuestion` hook becomes a no-op and nothing is sent. Questions still land on
+issues and the swarm still reads answers from them; that path never depended on
+chat. Setup, operation and troubleshooting live in the `dingtalk-bot` skill and in
+[`plugins/loop-on-issue/dingtalk/README.md`](plugins/loop-on-issue/dingtalk/README.md).
+
+Three jobs, and nothing else:
 
 1. **Relay questions**, as above.
-2. **Report to both surfaces** — a run's summary to the group, and a note on each
-   issue the run touched, each written to be read on its own.
-3. **Take requirements.** `@bot <requirement>` files an *intake issue* —
-   deliberately unqueued, so the swarm cannot claim it. One configured approver
-   releases it; then `loop-issue-creator` decomposes it into queued slices linked
-   back with `--epic`.
+2. **Report to both surfaces** — a run's summary to the conversation, and a note on
+   each issue the run touched, each written to be read on its own.
+3. **Take requirements.** Anyone may raise one by sending a plain sentence. It is
+   held **locally**, outside any repository, until the one configured approver
+   releases it — and only then does an agent decompose it into queued issues.
 
-It never runs the swarm. Filing issues is where it stops, which is what makes the
-approval gate the only thing between a group message and unattended code changes.
-Answering a question is open to anyone in an allow-listed conversation and records
-who answered; approving is not.
+**Nothing anyone says reaches a repository until the approver has said yes.** That
+gate is the only thing standing between a chat message and unattended code changes,
+which is why it is one named person, and why `/dev <issue>` — putting an agent on
+an existing issue right now — sits behind the same gate. Answering a question is
+open to anyone in an allow-listed conversation and records who answered, because
+that steers work a human already framed.
 
-Because the intake is an issue and the approval is a comment, there is no local
-queue file and no approval state machine anywhere — the board is both, and the
-listener can be restarted at any moment without losing anything.
+Only a **quote-reply** answers a question; a plain sentence is always a
+requirement. There is no guessing between the two.
 
-The listener is the only component with a pip dependency (`dingtalk-stream`, for
-the inbound long connection) and keeps its own virtualenv. Without it, everything
-above still works; you answer on the issue instead of in chat.
+One bot can serve several repositories. The registry is machine-level, because when
+a request arrives nobody has yet decided which one it belongs to, and each entry
+needs a local checkout as well as a project path — that is where the agent runs:
+
+```sh
+loop repos add loop  memorylake-ai/loop-on-issue  ~/github/loop-on-issue
+loop repos add bloom org/bloom                    ~/github/bloom
+loop repos default loop
+```
+
+A requirement goes to the default, and the approver redirects it in the same breath
+as approving (`同意 R20260824-01 bloom`). With several registered and no default, a
+bare requirement is refused rather than filed somewhere arbitrary.
+
+Approved work is drained by a **single serial worker** — two agents in one checkout
+fight over git state — and every job is durable, so a listener that dies mid-queue
+resumes on restart. The listener is the only component with a pip dependency
+(`dingtalk-stream`) and keeps its own virtualenv.
 
 ## Runners
 
@@ -227,8 +257,7 @@ its own vocabulary.
 | `template_lang` | `en` | `en` or `zh`, for the bundled fallbacks |
 | `verify_command` | `null` | this repo's real test command — **set it** |
 | `ask_wait` | `0` | seconds `loop ask` waits; 0 keeps sessions from blocking on a human |
-| `intake_label` | `intake` | label for a requirement raised in chat; never queued |
-| `creator_mode` | `routine` | who decomposes an approved requirement: the next run, or `immediate` |
+| `intake_ttl` | `604800` | how long a chat requirement waits for a decision; approved ones never expire |
 | `env_files` | `[".env"]` | gitignored files to copy into each worktree |
 | `escalation_command` | `null` | a channel other than the built-in one — Slack, Feishu, a pager |
 
@@ -267,9 +296,9 @@ skills do not cross:
 - **Every agent comment goes through the CLI**, so it carries the invisible marker.
   Without it, an agent's own note later reads as a human reply and wakes an issue
   nobody answered.
-- **Chat can file work, never run it.** A requirement from the group becomes an
-  unqueued issue and waits for one named approver; nothing in the chat surface
-  starts a session.
+- **Nothing from chat reaches a repository unapproved.** A requirement is held
+  locally until one named approver releases it, and putting an agent on an existing
+  issue sits behind the same gate.
 - **Credentials live outside the repository**, in `~/.loop-on-issue/dingtalk.env`
   at mode 600.
 

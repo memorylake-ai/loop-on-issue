@@ -8,12 +8,14 @@ Three jobs, and nothing else:
 2. **Report, dual-written.** A run's summary goes to the group, and every issue
    it touched gets a comment saying what happened to it. Both are written to be
    read on their own.
-3. **Take requirements.** A requirement raised in the group becomes an issue,
-   and — once approved — is decomposed into queue-ready work by
-   `loop-issue-creator`.
+3. **Take requirements.** Anyone can raise one; it is held locally until the one
+   configured approver releases it, and only then does an agent decompose it into
+   queue-ready issues.
 
-It never runs the swarm. Filing issues is where it stops, which is what makes the
-approval gate the only thing between a group message and unattended code changes.
+Nothing anyone says reaches a repository until the approver has said yes. That gate
+is the only thing between a chat message and unattended code changes, which is why
+it is one named person and why starting a session on an existing issue (`/dev`)
+sits behind the same gate.
 
 ## What is optional, and what is lost without it
 
@@ -107,30 +109,34 @@ dingtalk/run-bot.sh --stop
 
 | | |
 |---|---|
+| **anything without a leading `/`** | files a requirement |
 | **quote-reply a question card** | answers exactly that question, even with several open |
-| **reply without quoting** | answers the newest open question |
 | `/a <id> <text>` | answers a specific issue, no card needed |
-| `@bot <requirement>` | files a requirement (when no question is waiting) |
-| `/new <requirement>` | files a requirement, unambiguously |
 
-A bare message is read as an answer while a question is open, and as a new
-requirement otherwise. The bot always says which reading it took, so a wrong guess
-is visible immediately — and `/a` and `/new` force either one.
+There is no guessing. Only a quote-reply answers a question; a plain sentence is
+always a requirement. An earlier version read a bare message as an answer whenever
+some question happened to be open, which meant a new requirement could be
+swallowed by a question nobody was thinking about.
 
 ### Commands
 
 ```
-/q                       open questions
-/ls [state]              the board by state
-/i <id>                  one issue: state, runner, session, link
-/a <id> <text>           answer an issue
-/new <requirement>       file a requirement
-同意 <id> [note]          approve            (approver only)
-拒绝 <id> <reason>        reject             (approver only)
-/now <id>                decompose now      (approver only)
-/report                  re-send the last run summary
-/skip <id> confirm <why> retire an issue
-/requeue <id> confirm    put it back in the queue
+/new <requirement>          file a requirement (same as sending it plainly)
+/p                          requirements awaiting approval
+/r <ID>                     one request: status, approval, what it produced
+/q                          open questions
+/ls [state]                 the issue queue by state
+/i <id>                     one issue: state, runner, session, link
+/a <id> <text>              answer an issue
+/repos                      repositories this bot serves
+
+同意 <ID> [repo] [note]      approve                      (approver only)
+拒绝 <ID> <reason>           reject                       (approver only)
+/dev <issue> [repo]         put an agent on that issue   (approver only)
+
+/skip <id> confirm <why>    retire an issue
+/requeue <id> confirm       put it back in the queue
+/report                     re-send the last run summary
 /whoami  /ping  /h
 ```
 
@@ -142,23 +148,67 @@ between changes nothing.
 
 ```
 @bot 把首页 CTA 改强一点
-   → intake issue #712, unqueued, [PAUSED], approval requested
-   → approver: 同意 712 注意别动定价页
-   → approval recorded on #712 (the note carries the same weight as the request)
-   → loop-issue-creator decomposes it with --epic 712
-   → its draft is confirmed through the same question channel
-   → slices created, queued, Part of #712 · #712 → [FINISHED]
-   → swarm picks them up on its own schedule
+   → held locally as R20260824-01, pending. Nothing has touched any repository.
+   → approver: 同意 R20260824-01 bloom 注意别动定价页
+     (the repo is optional and redirects it; the note carries the same weight
+      as the requirement itself from that moment on)
+   → the serial worker runs loop-issue-creator in bloom's checkout
+   → issues created, and the report comes back to chat
+   → the swarm picks them up on its own schedule
 ```
 
-The intake issue is created **before** approval and **without** the queue label,
-so the swarm cannot see it. That is why there is no local queue file and no
-approval state machine: the board is both.
+**Nothing reaches a repository before approval.** An earlier design filed the
+requirement immediately as an unqueued issue, which meant anybody who could message
+the bot could write to the repository — and an issue tracker full of unapproved
+one-liners stops being readable. The decision to build something deserves a durable
+public record; the request to build it does not.
 
-`creator_mode` decides who decomposes an approved requirement. `routine` — the
-default — leaves it for the next scheduled run, which keeps the listener stateless
-and therefore safe to restart at any moment. `immediate` has the listener spawn
-one headless agent; `/now <id>` forces that on demand.
+So a pending request lives in `~/.loop-on-issue/intake/<ID>/`, outside any
+repository and outside version control, alongside the agent log and the report from
+running it. `loop intake` lists them from a terminal; `loop intake --id <ID>` shows
+one in full.
+
+Requests nobody decides on expire after `intake_ttl`. Approved ones never do —
+that would pull work out from under the agent holding it.
+
+## Putting an agent on an existing issue
+
+```
+/dev 612            # the default repository
+/dev 612 bloom      # a specific one
+```
+
+Approver-only, for the same reason approving is: both put an unattended agent to
+work. It goes through the same queue, the same log directory and the same report,
+and runs the `loop-issue-swarm` skill scoped to that one issue — so every safety
+boundary that skill states still holds, including never merging and never closing.
+
+## Several repositories
+
+One bot can serve several. The registry is machine-level, because when a request
+arrives nobody has yet decided which repository it belongs to:
+
+```sh
+loop repos add loop  memorylake-ai/loop-on-issue  ~/github/loop-on-issue
+loop repos add bloom org/bloom                    ~/github/bloom
+loop repos default loop
+loop repos                     # what is registered, and which is the default
+```
+
+A requirement goes to the default, and the approver can redirect it in the same
+breath as approving: `同意 R20260824-01 bloom`. With several registered and no
+default set, a bare requirement is refused rather than filed somewhere arbitrary —
+that mistake surfaces as a stranger's issue tracker filling up.
+
+Each entry needs a **local checkout**, not just a project path: that is where the
+agent runs.
+
+## One job at a time
+
+Approved work is drained by a single serial worker. Two agents in the same checkout
+fight over git state and two anywhere compete for the same quota, and decomposing a
+requirement is not urgent enough to be worth either. Jobs are durable, so a listener
+that dies mid-queue picks up where it left off on restart.
 
 ## Who may do what
 

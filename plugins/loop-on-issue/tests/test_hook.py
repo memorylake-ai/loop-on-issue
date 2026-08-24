@@ -95,6 +95,17 @@ class Hook(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.cli.calls, [])
 
+    def test_a_disabled_bot_makes_the_hook_a_no_op(self):
+        # The chat bot is optional. Switched off, AskUserQuestion has to behave
+        # exactly as it does in a plugin that never had the feature.
+        env_path = os.path.join(self.root, "off.env")
+        with open(env_path, "w") as fh:
+            fh.write('LOOP_DINGTALK_ENABLED="0"\n')
+        os.environ["LOOP_DINGTALK_ENV"] = env_path
+        code, _, _ = self.run_hook({"tool_input": TOOL_INPUT})
+        self.assertEqual(code, 0)
+        self.assertEqual(self.cli.calls, [])
+
     def test_an_unparseable_payload_does_not_block_the_session(self):
         saved_stdin = sys.stdin
         sys.stdin = io.StringIO("{not json")

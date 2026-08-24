@@ -29,7 +29,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from loopkit import ask as ask_mod  # noqa: E402
 from loopkit import config as cfg  # noqa: E402
 from loopkit import dingtalk as dt_mod  # noqa: E402
+from loopkit import intake as intake_mod  # noqa: E402
 from loopkit import pending  # noqa: E402
+from loopkit import repos as repos_mod  # noqa: E402
 from loopkit import doctor as doctor_mod  # noqa: E402
 from loopkit import remotes, runner as runner_mod, scaffold  # noqa: E402
 from loopkit import state as state_mod  # noqa: E402
@@ -512,6 +514,10 @@ def cmd_hook(args):
     issue_id = (os.environ.get("LOOP_ISSUE") or "").strip()
     if not issue_id.isdigit():
         return 0
+    if not dt_mod.enabled(dt_mod.load_env()):
+        # The chat bot is optional and switched off. Let the tool through rather
+        # than blocking a session on a channel nobody is listening to.
+        return 0
 
     try:
         payload = json.loads(sys.stdin.read() or "{}")
@@ -633,9 +639,98 @@ def cmd_report(args):
     return 0
 
 
+def cmd_repos(args):
+    """The repositories this machine's bot serves.
+
+    Per-repository settings stay in each repository; this registry is
+    machine-level because a bot taking requirements in chat has to know about
+    several before it knows which one a request belongs to.
+    """
+    registry = repos_mod.Registry.load()
+    if args.action == "add":
+        if not (args.name and args.repo_path and args.path):
+            raise CommandError("usage: loop repos add <name> <owner/name> <checkout path>")
+        if not os.path.isdir(os.path.expanduser(args.path)):
+            raise Precondition("{} is not a directory; the agent has to run somewhere "
+                               "real".format(args.path))
+        # Read the default *before* adding. A lone repository is the default
+        # implicitly, and that implicitness is not persisted — so adding a second
+        # one used to make the newcomer the default and quietly redirect every
+        # subsequent requirement into it.
+        previous = registry.default
+        registry.add(args.name, args.repo_path, args.path)
+        registry.set_default(previous.name if previous else args.name)
+        registry.save()
+    elif args.action == "remove":
+        if not registry.remove(args.name or ""):
+            raise Precondition("{!r} is not registered".format(args.name))
+        registry.save()
+    elif args.action == "default":
+        registry.set_default(args.name or "")
+        registry.save()
+
+    default = registry.default
+    payload = {
+        "default": default.name if default else None,
+        "repos": [{"name": e.name, "repo": e.repo, "path": e.path,
+                   "exists": os.path.isdir(e.path)} for e in registry.all()],
+        "path": repos_mod.DEFAULT_PATH,
+    }
+    if args.json:
+        out(payload)
+    else:
+        if not payload["repos"]:
+            print("no repositories registered ({})".format(repos_mod.DEFAULT_PATH))
+        for entry in payload["repos"]:
+            print("{:<20} {:<40} {}{}".format(
+                entry["name"], entry["repo"], entry["path"],
+                "" if entry["exists"] else "   ← checkout missing"))
+        if payload["repos"] and not payload["default"]:
+            print("\nNo default. A requirement raised in chat cannot be routed until "
+                  "one is set:\n  loop repos default <name>")
+        elif payload["default"]:
+            print("\ndefault: {}".format(payload["default"]))
+    return 0
+
+
+def cmd_intake(args):
+    """Requirements raised in chat, before they become issues."""
+    store = intake_mod.Store()
+    if args.action == "sweep":
+        ctx = Ctx(args)
+        expired = store.expire_stale(ctx.config.intake_ttl)
+        out({"expired": [r.id for r in expired]}, pretty=False)
+        return 0
+    if args.id:
+        request = store.get(args.id)
+        if not request:
+            raise Precondition("no request {!r}".format(args.id))
+        out(request.as_dict())
+        return 0
+    requests = store.all() if args.all else store.by_status(*intake_mod.OPEN)
+    if args.json:
+        out([r.as_dict() for r in requests])
+    else:
+        for request in requests:
+            print("{:<16} {:<10} {:<28} {}".format(
+                request.id, request.status, request.repo,
+                " ".join(request.text.split())[:60]))
+        if not requests:
+            print("nothing waiting")
+    return 0
+
+
 def cmd_dingtalk(args):
     env = dt_mod.load_env()
     client = dt_mod.DingTalk(env)
+    if args.action in ("enable", "disable"):
+        path = dt_mod.default_env_paths()[0]
+        dt_mod.set_enabled(path, args.action == "enable")
+        print("chat bot {} ({})".format(
+            "enabled" if args.action == "enable" else
+            "disabled — the AskUserQuestion hook is now a no-op and nothing is sent",
+            path))
+        return 0
     if args.action == "sweep":
         removed = pending_index().sweep()
         out({"swept": removed}, pretty=False)
@@ -649,6 +744,7 @@ def cmd_dingtalk(args):
             raise CommandError("listener not found at {}".format(script))
         os.execv("/bin/sh", ["/bin/sh", script] + list(args.extra or []))
     out({
+        "enabled": client.enabled,
         "configured": client.configured,
         "can_send": client.can_send,
         "robot_code": client.robot_code or None,
@@ -913,9 +1009,25 @@ def build_parser():
     sp.add_argument("event", choices=("ask-user-question",))
     sp.set_defaults(func=cmd_hook)
 
+    sp = sub.add_parser("repos", help="repositories this machine's bot serves")
+    sp.add_argument("action", nargs="?", default="list",
+                    choices=("list", "add", "remove", "default"))
+    sp.add_argument("name", nargs="?", help="short name used in chat")
+    sp.add_argument("repo_path", nargs="?", metavar="OWNER/NAME")
+    sp.add_argument("path", nargs="?", metavar="CHECKOUT")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_repos)
+
+    sp = sub.add_parser("intake", help="requirements raised in chat, awaiting a decision")
+    sp.add_argument("action", nargs="?", default="list", choices=("list", "sweep"))
+    sp.add_argument("--id", help="show one request in full")
+    sp.add_argument("--all", action="store_true", help="include decided ones")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_intake)
+
     sp = sub.add_parser("dingtalk", help="chat channel status and housekeeping")
     sp.add_argument("action", nargs="?", default="status",
-                    choices=("status", "sweep", "serve"))
+                    choices=("status", "sweep", "serve", "enable", "disable"))
     sp.add_argument("extra", nargs="*", help="passed through to the listener (serve)")
     sp.set_defaults(func=cmd_dingtalk)
 

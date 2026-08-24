@@ -226,3 +226,49 @@ class Cards(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Switch(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="loop-dt-switch-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "dingtalk.env")
+
+    def test_unset_means_on_when_credentials_exist(self):
+        # Somebody who configured the bot meant to use it; a second opt-in only
+        # produces a bot that silently does nothing.
+        self.assertTrue(dingtalk.enabled({}))
+
+    def test_explicit_off(self):
+        for value in ("0", "false", "no", "off", "OFF"):
+            self.assertFalse(dingtalk.enabled({"LOOP_DINGTALK_ENABLED": value}), value)
+
+    def test_explicit_on(self):
+        self.assertTrue(dingtalk.enabled({"LOOP_DINGTALK_ENABLED": "1"}))
+
+    def test_disabled_cannot_send_even_when_fully_configured(self):
+        client = dingtalk.DingTalk({
+            "DINGTALK_CLIENT_ID": "a", "DINGTALK_CLIENT_SECRET": "b",
+            "LOOP_DINGTALK_ENABLED": "0"})
+        self.assertTrue(client.configured)
+        self.assertFalse(client.can_send)
+
+    def test_the_switch_is_written_in_place(self):
+        with open(self.path, "w") as fh:
+            fh.write('DINGTALK_CLIENT_ID="keep-me"\n')
+        dingtalk.set_enabled(self.path, False)
+        env = dingtalk.load_env([self.path], environ={})
+        self.assertEqual(env["DINGTALK_CLIENT_ID"], "keep-me")
+        self.assertFalse(dingtalk.enabled(env))
+
+    def test_flipping_it_back_does_not_accumulate_lines(self):
+        dingtalk.set_enabled(self.path, False)
+        dingtalk.set_enabled(self.path, True)
+        with open(self.path) as fh:
+            body = fh.read()
+        self.assertEqual(body.count("LOOP_DINGTALK_ENABLED"), 1)
+        self.assertTrue(dingtalk.enabled(dingtalk.load_env([self.path], environ={})))
+
+    def test_the_file_is_created_owner_only(self):
+        dingtalk.set_enabled(self.path, True)
+        self.assertEqual(oct(os.stat(self.path).st_mode & 0o777), "0o600")

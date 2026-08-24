@@ -66,24 +66,20 @@ DEFAULTS: Dict[str, Any] = {
     # issue pause. Zero keeps the swarm's rule that a session never blocks on a
     # human; the interactive hook overrides it with a short window.
     "ask_wait": 0,
-    # Label put on an issue that carries a requirement raised in chat. Such an
-    # issue is never queued, so the swarm cannot claim it.
-    "intake_label": "intake",
-    # Who decomposes an approved requirement: "routine" leaves it for the next
-    # scheduled run (the listener stays stateless), "immediate" has the listener
-    # spawn one headless agent right away.
-    "creator_mode": "routine",
+    # How long a requirement raised in chat waits for a decision before it is
+    # retired. Approved ones are never expired — that would pull work out from
+    # under the agent holding it.
+    "intake_ttl": 604800,
 }
 
 _ENUMS = {
     "forge": ("auto", "github", "gitlab"),
     "runner": ("claude", "codex"),
     "template_lang": ("en", "zh"),
-    "creator_mode": ("routine", "immediate"),
 }
 
 _POSITIVE_INTS = ("max_parallel", "session_timeout")
-_NON_NEGATIVE_INTS = ("ask_wait",)
+_NON_NEGATIVE_INTS = ("ask_wait", "intake_ttl")
 _LISTS = ("env_files",)
 _STRINGS = (
     "queue_label",
@@ -91,7 +87,6 @@ _STRINGS = (
     "push_remote",
     "target_remote",
     "worktree_dir",
-    "intake_label",
 )
 
 

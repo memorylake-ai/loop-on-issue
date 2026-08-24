@@ -75,12 +75,14 @@ class Dispatch(unittest.TestCase):
         action = listener.dispatch(msg(text="2", pqk="PQK-9"), self.ALLOWED, has_pending=True)
         self.assertEqual((action.kind, action.pqk), (listener.ANSWER, "PQK-9"))
 
-    def test_a_bare_reply_answers_the_newest_open_question(self):
-        action = listener.dispatch(msg(text="go left"), self.ALLOWED, has_pending=True)
-        self.assertEqual(action.kind, listener.ANSWER)
-        self.assertIsNone(action.pqk)
+    def test_a_bare_message_is_a_requirement_even_with_a_question_open(self):
+        # Only a quote-reply answers. Reading a bare sentence as an answer
+        # whenever some question happened to be open meant a new requirement
+        # could be swallowed by a question nobody was thinking about.
+        action = listener.dispatch(msg(text="把首页 CTA 改强一点"), self.ALLOWED, has_pending=True)
+        self.assertEqual(action.kind, listener.INTAKE)
 
-    def test_a_bare_message_with_nothing_pending_is_a_requirement(self):
+    def test_a_bare_message_with_nothing_pending_is_also_a_requirement(self):
         action = listener.dispatch(msg(text="把首页 CTA 改强一点"), self.ALLOWED, has_pending=False)
         self.assertEqual(action.kind, listener.INTAKE)
 
@@ -190,17 +192,22 @@ class Brains(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="loop-listener-")
         self.addCleanup(shutil.rmtree, self.dir, True)
-        self.index = pending.Index(self.dir)
+        self.index = pending.Index(self.dir + "/pending")
         self.forge = FakeForge()
+        from loopkit import intake as intake_mod
+        from loopkit import repos as repos_mod
+
+        registry = repos_mod.Registry()
+        registry.add("widget", "acme/widget", self.dir + "/widget")
         self.brain = listener.Brain(
             forge_for=lambda repo: self.forge,
-            default_repo="acme/widget",
+            registry=registry,
             index=self.index,
+            store=intake_mod.Store(self.dir + "/intake"),
             conversations=["cid-1"],
             approver=self.APPROVER,
             approver_nick="Julian",
             queue_label="loop",
-            intake_label="intake",
             assignee="muxuan",
         )
 
@@ -225,76 +232,14 @@ class Brains(unittest.TestCase):
         self.brain.handle(msg(text="go left", pqk="PQK-9", nick="李四"))
         self.assertIn("李四", self.forge.comments[612][-1].body)
 
-    def test_a_bare_reply_goes_to_the_newest_open_question(self):
-        self.forge.add(612)
-        self.forge.add(613)
-        self.index.record("old", {"repo": "acme/widget", "issue": 612}, now=1.0)
-        self.index.record("new", {"repo": "acme/widget", "issue": 613}, now=2.0)
-        self.brain.handle(msg(text="do the second thing"))
-        self.assertEqual(len(self.forge.comments[613]), 1)
-        self.assertEqual(len(self.forge.comments[612]), 0)
-
     def test_an_unknown_routing_key_says_so_rather_than_guessing(self):
         reply = self.brain.handle(msg(text="1", pqk="PQK-gone"))
         self.assertIn("过期", reply)
 
-    # -- intake --------------------------------------------------------------
-    def test_a_requirement_becomes_an_unqueued_issue(self):
-        # Unqueued is the point: the swarm must not be able to claim something
-        # nobody has approved.
-        self.brain.handle(msg(text="把首页 CTA 改强一点"))
-        created = self.forge.created[-1]
-        self.assertIn("intake", created["labels"])
-        self.assertNotIn("loop", created["labels"])
-
-    def test_the_requirement_is_recorded_verbatim(self):
-        self.brain.handle(msg(text="把首页 CTA 改强一点"))
-        self.assertIn("把首页 CTA 改强一点", self.forge.created[-1]["body"])
-
-    def test_the_requester_and_source_are_recorded(self):
-        self.brain.handle(msg(text="做个东西", nick="王五", conversation="cid-1"))
-        body = self.forge.created[-1]["body"]
-        self.assertIn("王五", body)
-        self.assertIn("cid-1", body)
-
-    def test_an_intake_starts_paused_awaiting_approval(self):
-        self.brain.handle(msg(text="做个东西"))
-        number = self.forge.created and 700
-        self.assertTrue(self.forge.titles[number].startswith("[PAUSED]"))
-
-    def test_the_reply_names_who_must_approve(self):
-        reply = self.brain.handle(msg(text="做个东西"))
-        self.assertIn("Julian", reply)
-
-    def test_the_approver_raising_it_needs_no_second_approval(self):
-        reply = self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
-        self.assertIn("免审批", reply)
-        self.assertTrue(self.forge.titles[700].startswith("[WORKING]"))
-
-    # -- approval ------------------------------------------------------------
-    def test_only_the_approver_may_approve(self):
-        self.brain.handle(msg(text="做个东西"))
-        reply = self.brain.handle(msg(text="同意 700", msg_id="m2", sender="somebody-else", nick="路人"))
-        self.assertIn("只有", reply)
-        self.assertTrue(self.forge.titles[700].startswith("[PAUSED]"))
-
-    def test_the_approver_releases_it(self):
-        self.brain.handle(msg(text="做个东西"))
-        reply = self.brain.handle(msg(text="同意 700", msg_id="m2", sender=self.APPROVER))
-        self.assertTrue(self.forge.titles[700].startswith("[WORKING]"))
-        self.assertIn("700", reply)
-
-    def test_approval_is_written_onto_the_issue(self):
-        self.brain.handle(msg(text="做个东西"))
-        self.brain.handle(msg(text="同意 700 注意别动定价页", msg_id="m2", sender=self.APPROVER))
-        body = "\n".join(c.body for c in self.forge.comments[700])
-        self.assertIn("Julian", body)
-        self.assertIn("注意别动定价页", body)
-
-    def test_rejection_retires_the_intake(self):
-        self.brain.handle(msg(text="做个东西"))
-        self.brain.handle(msg(text="拒绝 700 这个已经做过了不需要再做", msg_id="m2", sender=self.APPROVER))
-        self.assertTrue(self.forge.titles[700].startswith("[SKIP]"))
+    def test_an_explicit_answer_still_reaches_a_specific_issue(self):
+        self.forge.add(612)
+        self.brain.handle(msg(text="/a 612 go left"))
+        self.assertIn("go left", self.forge.comments[612][-1].body)
 
     # -- commands ------------------------------------------------------------
     def test_whoami_hands_back_pasteable_configuration(self):

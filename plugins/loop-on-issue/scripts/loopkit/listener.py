@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from . import intake as intake_mod
 from . import state
 from .errors import Precondition
 
@@ -36,7 +37,10 @@ INTAKE = "intake"
 #: Commands anyone in an allow-listed conversation may run, versus the ones only
 #: the approver may. Approving is the gate between a chat message and unattended
 #: code changes, so it is held to a stricter standard than answering a question.
-APPROVER_ONLY = ("approve", "reject", "now")
+#: Approving a requirement and starting a session on an issue are the same class
+#: of act — both put an unattended agent to work — so they sit behind the same
+#: gate. Everything else, answering included, is open to the conversation.
+APPROVER_ONLY = ("approve", "reject", "dev")
 
 #: The one command an unlisted conversation may run. Without it the allow-list is
 #: a bootstrap deadlock: you cannot fill in a conversationId without first being
@@ -52,12 +56,15 @@ _ALIASES = {
     "i": "i", "issue": "i", "show": "i",
     "a": "a", "answer": "a",
     "new": "new", "intake": "new",
+    "p": "p", "reqs": "p", "requests": "p",
+    "r": "r", "req": "r",
+    "repos": "repos", "repo": "repos",
+    "dev": "dev", "go": "dev", "start": "dev",
     "approve": "approve", "ok": "approve",
     "reject": "reject",
     "report": "report",
     "skip": "skip",
     "requeue": "requeue", "unclaim": "requeue",
-    "now": "now",
     "ping": "ping",
 }
 
@@ -138,7 +145,7 @@ def needs_confirm(rest: str) -> Tuple[bool, str]:
     return True, (rest or "").strip()
 
 
-def dispatch(inbound: Inbound, conversations: List[str], has_pending: bool) -> Action:
+def dispatch(inbound: Inbound, conversations: List[str], has_pending: bool = False) -> Action:
     text = strip_mention(inbound.text)
     if not text.strip():
         return Action(IGNORE)
@@ -154,11 +161,11 @@ def dispatch(inbound: Inbound, conversations: List[str], has_pending: bool) -> A
         return Action(COMMAND, text=text, command=name, rest=rest)
 
     if inbound.pqk:
-        # Quoting a card is an unambiguous statement of intent, even if the index
-        # entry has since been swept.
+        # Quoting a card is an unambiguous statement of intent. Only a quote
+        # answers a question: reading a bare sentence as an answer whenever one
+        # happened to be open meant a new requirement could be swallowed by a
+        # question nobody was thinking about.
         return Action(ANSWER, text=text, pqk=inbound.pqk)
-    if has_pending:
-        return Action(ANSWER, text=text)
     return Action(INTAKE, text=text)
 
 
@@ -167,12 +174,29 @@ def dispatch(inbound: Inbound, conversations: List[str], has_pending: bool) -> A
 # --------------------------------------------------------------------------- #
 
 HELP = """**loop-on-issue**
-`/q` 待答问题 · `/ls [状态]` 看板 · `/i <id>` 看一条
-`/a <id> <文本>` 作答 · 引用回复卡片 = 直接作答
-`/new <需求>` 提需求 · `同意 <id>` / `拒绝 <id> <理由>`（仅审批人）
-`/report` 重发上轮报告 · `/now <id>` 立即拆需求（仅审批人）
+
+**直接发一句话 = 提需求**（不用加 `/`）。要作答请**引用回复**那张问题卡片。
+
+_提需求与查看_
+`/new <需求>` 提需求（与直接发一句话等价）
+`/p` 待审批的需求 · `/r <ID>` 看某条需求的状态与产物
+`/q` 待答问题 · `/ls [状态]` 看 issue 队列 · `/i <id>` 看某个 issue
+`/repos` 本机服务的仓库
+
+_作答_
+引用回复问题卡片，或 `/a <id> <文本>`
+
+_仅审批人_
+`同意 <ID> [仓库] [备注]` 批准（也可写 `/approve`）
+`拒绝 <ID> <理由>` 驳回（也可写 `/reject`）
+`/dev <issue> [仓库]` 让 agent 现在就去开发这个 issue
+
+_看板维护_
 `/skip <id> confirm <理由>` 退掉 · `/requeue <id> confirm` 放回队列
-`/ping` 存活 · `/whoami` 看自己的 staffId 与会话 ID"""
+`/report` 重发上轮报告
+
+_其他_
+`/ping` 存活 · `/whoami` 看自己的 staffId 与会话 ID · `/h`（`/help`）本帮助"""
 
 
 class Brain:
@@ -181,34 +205,39 @@ class Brain:
     def __init__(
         self,
         forge_for: Callable[[str], Any],
-        default_repo: str,
+        registry: Any,
         index: Any,
+        store: Any,
         conversations: List[str],
         approver: str = "",
         approver_nick: str = "",
         queue_label: str = "loop",
-        intake_label: str = "intake",
         assignee: Optional[str] = None,
-        creator_mode: str = "routine",
-        spawn_creator: Optional[Callable[[int], str]] = None,
+        enqueue: Optional[Callable[[Any], None]] = None,
         last_report: str = "",
     ):
         self.forge_for = forge_for
-        self.default_repo = default_repo
+        self.registry = registry
         self.index = index
+        self.store = store
         self.conversations = list(conversations or [])
         self.approver = approver
         self.approver_nick = approver_nick or approver or "审批人"
         self.queue_label = queue_label
-        self.intake_label = intake_label
         self.assignee = assignee
-        self.creator_mode = creator_mode
-        self.spawn_creator = spawn_creator
+        # Called with an approved Request. Injected so the Brain never owns a
+        # subprocess and stays testable without one.
+        self.enqueue = enqueue or (lambda request: None)
         self.last_report = last_report
+
+    @property
+    def default_repo(self) -> str:
+        entry = self.registry.default
+        return entry.repo if entry else ""
 
     # -- entry point ---------------------------------------------------------
     def handle(self, inbound: Inbound) -> str:
-        action = dispatch(inbound, self.conversations, has_pending=bool(self.index.newest()))
+        action = dispatch(inbound, self.conversations)
         if action.kind == IGNORE:
             return ""
         try:
@@ -254,31 +283,46 @@ class Brain:
 
     # -- intake --------------------------------------------------------------
     def _intake(self, text: str, inbound: Inbound) -> str:
-        forge = self.forge_for(self.default_repo)
-        auto = bool(self.approver) and inbound.sender_id == self.approver
-        title = _title_from(text)
-        body = _intake_body(text, inbound, self.approver_nick, auto)
+        """File a requirement locally. Nothing reaches the forge until approved.
 
-        issue = forge.create_issue(
-            title, body,
-            labels=[self.intake_label],
-            assignees=[self.assignee] if self.assignee else None,
+        An earlier version created an unqueued issue here, which meant anybody who
+        could message the bot could write to the repository. The decision to build
+        something needs a durable public record; the *request* to build it does
+        not, and an issue tracker full of unapproved one-liners stops being
+        readable.
+        """
+        entry = self.registry.default
+        if entry is None:
+            names = "、".join(self.registry.names()) or "（一个都没配）"
+            return ("这台机器服务多个仓库，没有默认，我不知道这条需求归哪个。\n"
+                    "用 `/new <需求>` 之前先设默认，或让审批人批准时指定仓库。\n"
+                    "已配置：{}".format(names))
+
+        request = intake_mod.Request(
+            id=self.store.new_id(),
+            text=text.strip(),
+            requester=inbound.sender_nick,
+            requester_id=inbound.sender_id,
+            conversation=inbound.conversation_id,
+            repo=entry.repo,
         )
-        number = issue.number
+        auto = bool(self.approver) and inbound.sender_id == self.approver
+        if auto:
+            request.approve(by=inbound.sender_nick or self.approver_nick, auto=True)
+        self.store.save(request)
 
         if auto:
-            _set_state(forge, number, "WORKING")
-            forge.add_issue_comment(number, state.stamp(
-                "由 **{}** 本人提出，免审批，直接进入拆分。".format(inbound.sender_nick or self.approver_nick)))
-            return ("已受理 #{}（审批人本人提交，**免审批**）：{}\n"
-                    "撤销：`/reject {} <理由>`".format(number, issue.url, number))
-
-        _set_state(forge, number, "PAUSED")
-        forge.add_issue_comment(number, state.stamp(
-            "等待 **{}** 批准。批准后才会拆成可执行 issue。".format(self.approver_nick)))
-        return ("📥 已受理 #{} 待审批：{}\n"
-                "请 **{}** 回复 `同意 {}`（或 `拒绝 {} <理由>`）。".format(
-                    number, issue.url, self.approver_nick, number, number))
+            self.enqueue(request)
+            return ("已受理 **{}**（审批人本人提交，**免审批**），排入拆分队列。\n"
+                    "仓库：`{}` · 撤销：`拒绝 {} <理由>`".format(request.id, entry.repo, request.id))
+        return ("📥 已受理 **{}**，待 **{}** 批准。\n"
+                "> {}\n\n"
+                "拟归入：`{}`（{}）\n"
+                "批准：`同意 {}`，改仓库：`同意 {} <仓库>`，驳回：`拒绝 {} <理由>`".format(
+                    request.id, self.approver_nick,
+                    request.text.replace("\n", "\n> "),
+                    entry.repo, entry.name,
+                    request.id, request.id, request.id))
 
     # -- commands ------------------------------------------------------------
     def _command(self, action: Action, inbound: Inbound) -> str:
@@ -374,44 +418,128 @@ class Brain:
     def _cmd_report(self, rest, inbound):
         return self.last_report or "还没有可重发的报告。"
 
+    def _cmd_p(self, rest, inbound):
+        waiting = self.store.by_status(intake_mod.PENDING)
+        if not waiting:
+            return "没有待审批的需求。"
+        lines = ["**待审批 {} 条**".format(len(waiting))]
+        for request in waiting[:15]:
+            lines.append("- **{}** · `{}` · {} 提\n  > {}".format(
+                request.id, request.repo, request.requester or "?",
+                _one_line(request.text)))
+        return "\n".join(lines)
+
+    def _cmd_r(self, rest, inbound):
+        request = self.store.get((rest or "").strip().split(" ")[0])
+        if not request:
+            return "找不到 `{}`。用 `/p` 看待审批的。".format((rest or "").strip())
+        lines = [
+            "**{}** · {} · `{}`".format(request.id, request.status, request.repo),
+            "> {}".format(_one_line(request.text, 200)),
+            "提出：{}".format(request.requester or "?"),
+        ]
+        if request.approved_by:
+            lines.append("审批：{}{}".format(
+                request.approved_by, "（本人提交免审批）" if request.auto_approved else ""))
+        if request.approval_note:
+            lines.append("审批备注：{}".format(request.approval_note))
+        if request.rejected_reason:
+            lines.append("驳回理由：{}".format(request.rejected_reason))
+        if request.issues:
+            lines.append("产出：\n" + "\n".join("- {}".format(u) for u in request.issues))
+        if request.error:
+            lines.append("失败：{}".format(request.error))
+        return "\n".join(lines)
+
+    def _cmd_repos(self, rest, inbound):
+        entries = self.registry.all()
+        if not entries:
+            return "还没有配置任何仓库。"
+        default = self.registry.default
+        return "\n".join(
+            "- `{}` → `{}`{}".format(e.name, e.repo, "  ← 默认" if default and e.name == default.name else "")
+            for e in entries
+        )
+
     def _cmd_approve(self, rest, inbound):
-        number = _first_int(rest)
-        if number is None:
-            return "用法：`同意 <id> [备注]`"
-        note = re.sub(r"^\s*#?\d+\s*", "", rest or "", count=1).strip()
-        forge = self.forge_for(self.default_repo)
-        _set_state(forge, number, "WORKING")
-        forge.add_issue_comment(number, state.stamp(
-            "**已批准** — {} 于此批准。{}".format(
-                self.approver_nick, "\n\n审批备注（与需求原文同等效力）：{}".format(note) if note else "")))
-        started = ""
-        if self.creator_mode == "immediate" and self.spawn_creator:
-            started = "\n" + self.spawn_creator(number)
-        return "✅ #{} 已批准。{}{}".format(
-            number,
-            "正在拆分。" if self.creator_mode == "immediate" else "下一轮 routine 会拆成可执行 issue。",
-            started)
+        request_id, remainder = _split_id(rest)
+        if not request_id:
+            return "用法：`同意 <ID> [仓库] [备注]`"
+        request = self.store.get(request_id)
+        if not request:
+            return "找不到 `{}`。用 `/p` 看待审批的。".format(request_id)
+        repo, note = self._split_repo(remainder)
+        try:
+            request.approve(by=inbound.sender_nick or self.approver_nick, note=note, repo=repo)
+        except intake_mod.NotPending as exc:
+            return "{}（不会重复排队）".format(exc).replace("is already", "已经是")
+        self.store.save(request)
+        self.enqueue(request)
+        return "✅ **{}** 已批准，排入队列。仓库：`{}`{}".format(
+            request.id, request.repo,
+            "\n审批备注：{}".format(note) if note else "")
 
     def _cmd_reject(self, rest, inbound):
-        number = _first_int(rest)
-        reason = re.sub(r"^\s*#?\d+\s*", "", rest or "", count=1).strip()
-        if number is None:
-            return "用法：`拒绝 <id> <理由>`"
-        if len(reason) < 4:
-            return "拒绝要写理由——提需求的人只会看到这句话。"
-        forge = self.forge_for(self.default_repo)
-        forge.add_issue_comment(number, state.stamp(
-            "**未批准** — {} 拒绝。\n\n{}".format(self.approver_nick, reason)))
-        _set_state(forge, number, "SKIP")
-        return "🚫 #{} 已拒绝：{}".format(number, reason)
+        request_id, reason = _split_id(rest)
+        if not request_id:
+            return "用法：`拒绝 <ID> <理由>`"
+        request = self.store.get(request_id)
+        if not request:
+            return "找不到 `{}`。".format(request_id)
+        if len(reason.strip()) < 3:
+            return "驳回要写理由——提需求的人只会看到这句话。"
+        try:
+            request.reject(by=inbound.sender_nick or self.approver_nick, reason=reason.strip())
+        except intake_mod.NotPending as exc:
+            return "{}".format(exc).replace("is already", "已经是")
+        self.store.save(request)
+        return "🚫 **{}** 已驳回：{}".format(request.id, reason.strip())
 
-    def _cmd_now(self, rest, inbound):
+    def _cmd_dev(self, rest, inbound):
+        """Put an agent on one existing issue, now.
+
+        Approver-only for the same reason approving is: it puts an unattended
+        agent to work. The job goes through the same store and the same serial
+        worker as a decomposition, so it has a log, a status and a reply.
+        """
         number = _first_int(rest)
         if number is None:
-            return "用法：`/now <id>`"
-        if not self.spawn_creator:
-            return "这台机器没有开启立即拆分（`creator_mode`）。"
-        return self.spawn_creator(number)
+            return "用法：`/dev <issue 号> [仓库]`"
+        _, remainder = _split_id(rest)
+        repo, _ = self._split_repo(re.sub(r"^\s*#?\d+\s*", "", rest or "", count=1))
+        entry = self.registry.get(repo) if repo else self.registry.default
+        if entry is None:
+            return "不知道该在哪个仓库开发 #{}。可用：{}".format(
+                number, "、".join(self.registry.names()) or "（一个都没配）")
+        request = intake_mod.Request(
+            id=self.store.new_id(),
+            text="Develop issue #{} in {}".format(number, entry.repo),
+            kind=intake_mod.DEVELOP,
+            issue=number,
+            requester=inbound.sender_nick,
+            requester_id=inbound.sender_id,
+            conversation=inbound.conversation_id,
+            repo=entry.repo,
+        )
+        request.approve(by=inbound.sender_nick or self.approver_nick, auto=True)
+        self.store.save(request)
+        self.enqueue(request)
+        return "🚀 **{}** 已排入队列：在 `{}` 开发 #{}。".format(request.id, entry.repo, number)
+
+    def _split_repo(self, text: str):
+        """Pull a leading repository name out of the rest of an approval.
+
+        Only if it actually resolves — otherwise `同意 R… 尽快` would silently
+        redirect the work to nowhere and eat the note.
+        """
+        text = (text or "").strip()
+        if not text:
+            return None, ""
+        head, _, tail = text.partition(" ")
+        entry = self.registry.get(head)
+        if entry:
+            return entry.repo, tail.strip()
+        return None, text
 
     def _cmd_skip(self, rest, inbound):
         number = _first_int(rest)
@@ -454,6 +582,21 @@ def _set_state(forge, number: int, target: Optional[str]) -> None:
     issue = forge.get_issue(number)
     _, base = state.split_state(issue.title)
     forge.set_issue_title(number, state.compose(target, base))
+
+
+def _split_id(text: str):
+    """`(request id, the rest)` — ids look like `R20260824-01`."""
+    text = (text or "").strip()
+    m = re.match(r"(R\d{8}-\d+)\s*(.*)$", text, flags=re.DOTALL)
+    if m:
+        return m.group(1), m.group(2).strip()
+    head, _, tail = text.partition(" ")
+    return (head, tail.strip()) if head else (None, "")
+
+
+def _one_line(text: str, limit: int = 80) -> str:
+    line = " ".join((text or "").split())
+    return line if len(line) <= limit else line[: limit - 1] + "…"
 
 
 def _first_int(text: str) -> Optional[int]:

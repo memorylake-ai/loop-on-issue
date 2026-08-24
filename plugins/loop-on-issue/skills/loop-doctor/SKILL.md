@@ -169,6 +169,17 @@ conversation would tell you.
 Credentials go to `~/.loop-on-issue/dingtalk.env` at mode 600, never into the
 repository. Never print a secret back to the user, and never commit one.
 
+Two other machine-level files sit beside them, and both are worth checking when
+the chat side misbehaves:
+
+- `~/.loop-on-issue/repos.json` — which repositories this bot serves, and where
+  each one is checked out. `loop repos` reads and edits it. With several
+  registered and no default, a requirement raised in chat is refused rather than
+  filed somewhere arbitrary; say so plainly rather than picking one.
+- `~/.loop-on-issue/intake/` — requirements awaiting a decision, plus the agent
+  log and report from each one that ran. `loop intake` lists them. Nothing here
+  has touched a repository yet, which is the point.
+
 ## Configuration reference
 
 `.loop-on-issue/config.json`, read by every command:
@@ -186,8 +197,7 @@ repository. Never print a secret back to the user, and never commit one.
 | `verify_command` | this repo's real test command — **set it** |
 | `env_files` | gitignored files a worktree needs; `git worktree add` will not carry them over |
 | `ask_wait` | seconds `loop ask` waits before letting an issue pause; 0 keeps the rule that a session never blocks on a human |
-| `intake_label` | label for a requirement raised in chat; such an issue is never queued |
-| `creator_mode` | `routine` (the next run decomposes an approved requirement) or `immediate` (the listener spawns one agent) |
+| `intake_ttl` | how long a requirement raised in chat waits for a decision before it is retired; approved ones never expire |
 | `escalation_command` | a channel other than DingTalk — Slack, Feishu, a pager. Null means the built-in channel and the issue thread |
 
 An unrecognised key is reported and ignored, so a config written by a newer
