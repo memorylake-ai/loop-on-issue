@@ -591,6 +591,10 @@ def make_brain(env, repo_root, enqueue=None):
         queue_label=conf.queue_label,
         assignee=conf.assignee,
         enqueue=enqueue,
+        allow_conversation=lambda cid, private: dt_mod.allow_conversation(
+            dt_mod.default_env_paths()[0], cid, private),
+        deny_conversation=lambda cid: dt_mod.deny_conversation(
+            dt_mod.default_env_paths()[0], cid),
     )
     return brain, registry, store, conf
 
@@ -649,6 +653,10 @@ def run(env, repo_root):
                      (inbound.pqk or "")[:12], inbound.text[:120])
             # At-least-once delivery: a reconnect redelivers the same id, and
             # acting twice on an approval would start the same job twice.
+            # Re-read the allow-list per message: it is a small file, and a
+            # conversation added with /allow has to work in the next breath rather
+            # than after somebody restarts the listener.
+            brain.conversations = dt_mod.conversations(dt_mod.load_env())
             if inbound.msg_id and dedupe.seen(inbound.msg_id):
                 log.info("duplicate delivery %s ignored", inbound.msg_id)
                 return AckMessage.STATUS_OK, "duplicate"

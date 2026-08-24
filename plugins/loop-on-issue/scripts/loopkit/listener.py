@@ -40,13 +40,17 @@ INTAKE = "intake"
 #: Approving a requirement and starting a session on an issue are the same class
 #: of act — both put an unattended agent to work — so they sit behind the same
 #: gate. Everything else, answering included, is open to the conversation.
-APPROVER_ONLY = ("approve", "reject", "dev", "repo", "cancel")
+APPROVER_ONLY = ("approve", "reject", "dev", "repo", "cancel", "allow", "deny")
 
 #: The one command an unlisted conversation may run. Without it the allow-list is
 #: a bootstrap deadlock: you cannot fill in a conversationId without first being
 #: told it, and you cannot be told it from a conversation that is ignored. It
 #: reveals only the caller's own identifiers, which they already have.
-ALLOWLIST_EXEMPT = ("whoami",)
+#: Runnable from a conversation that is not yet allow-listed. `whoami` because
+#: filling the list needs a value only an allow-listed conversation would tell
+#: you; `allow` because the whole point is to be used somewhere not yet listed —
+#: and it is gated on the approver instead.
+ALLOWLIST_EXEMPT = ("whoami", "allow")
 
 _ALIASES = {
     "h": "help", "help": "help", "?": "help",
@@ -61,6 +65,8 @@ _ALIASES = {
     "repos": "repos", "repo": "repo",
     "dev": "dev", "go": "dev", "start": "dev",
     "cancel": "cancel", "stop": "cancel", "kill": "cancel",
+    "allow": "allow", "enable-here": "allow",
+    "deny": "deny", "disable-here": "deny",
     "approve": "approve", "ok": "approve",
     "reject": "reject",
     "report": "report",
@@ -262,6 +268,7 @@ HELP = md(
     bullets(
         "`/ping` — 存活",
         "`/whoami` — 看自己的 staffId 与会话 ID",
+        "`/allow` — 把当前群/私聊加进白名单（仅审批人）· `/deny` 移出",
         "`/h`（`/help`）— 本帮助",
     ),
 )
@@ -283,6 +290,8 @@ class Brain:
         assignee: Optional[str] = None,
         enqueue: Optional[Callable[[Any], None]] = None,
         cancel_job: Optional[Callable[[str, str], Any]] = None,
+        allow_conversation: Optional[Callable[[str, bool], Any]] = None,
+        deny_conversation: Optional[Callable[[str], Any]] = None,
         last_report: str = "",
     ):
         self.forge_for = forge_for
@@ -301,6 +310,9 @@ class Brain:
         # still mark the record, which is better than nothing but does not free
         # the worker.
         self.cancel_job = cancel_job
+        # Injected, so the Brain never decides where credentials live.
+        self.allow_conversation = allow_conversation
+        self.deny_conversation = deny_conversation
         self.last_report = last_report
 
     @property
@@ -499,6 +511,46 @@ class Brain:
             bullets(*lines),
             "本会话{}在白名单里。".format("已经" if listed else "**还不**"),
         )
+
+    def _cmd_allow(self, rest, inbound):
+        """Add the conversation this was sent from to the allow-list.
+
+        Exempt from the allow-list by necessity — it exists to be used somewhere
+        not yet listed — and gated on the approver instead, which is the same
+        person who decides what work runs.
+
+        Whether it is a group or a private chat comes from DingTalk rather than
+        from the id, which does not say: a card sent to the group endpoint with a
+        private id is accepted and never delivered, and nothing errors.
+        """
+        if self.allow_conversation is None:
+            return "这台机器上没有可写的配置，加不了。"
+        private = inbound.conversation_type == "1"
+        try:
+            self.allow_conversation(inbound.conversation_id, private)
+        except Exception as exc:  # noqa: BLE001
+            return "加不进去：{}".format(exc)
+        if inbound.conversation_id not in self.conversations:
+            self.conversations.append(inbound.conversation_id)
+        return md(
+            "✅ 本{}已加入白名单，立即生效。".format("私聊" if private else "群"),
+            bullets(
+                "`{}`".format(inbound.conversation_id),
+                "主动发的卡片（提问、运行报告）也会回到这里",
+                "移出：`/deny`",
+            ),
+        )
+
+    def _cmd_deny(self, rest, inbound):
+        if self.deny_conversation is None:
+            return "这台机器上没有可写的配置，改不了。"
+        try:
+            self.deny_conversation(inbound.conversation_id)
+        except Exception as exc:  # noqa: BLE001
+            return "移不出去：{}".format(exc)
+        if inbound.conversation_id in self.conversations:
+            self.conversations.remove(inbound.conversation_id)
+        return "本会话已移出白名单，之后这里的消息都会被忽略（`/allow` 可以加回来）。"
 
     def _cmd_ping(self, rest, inbound):
         return "alive · 待答 {} 条".format(len(self.index.all()))

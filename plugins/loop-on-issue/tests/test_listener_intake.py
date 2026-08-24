@@ -553,3 +553,56 @@ class WorkAnswersWhereItCame(Base):
         self.forge.add(612)
         self.brain.handle(msg(text="/dev 612", conversation="cid-1", sender=self.APPROVER))
         self.assertEqual(self.enqueued[0].conversation, "cid-1")
+
+
+class SelfServiceAllowList(Base):
+    """Adding a group should not mean editing a file and restarting."""
+
+    def setUp(self):
+        Base.setUp(self)
+        self.allowed = []
+        self.denied = []
+        self.brain.allow_conversation = lambda cid, private: self.allowed.append((cid, private))
+        self.brain.deny_conversation = self.denied.append
+
+    def _say(self, text, sender=None, conversation="cid-new", ctype="2"):
+        return self.brain.handle(listener.Inbound(
+            msg_id=text + conversation, text=text, sender_id=sender or self.APPROVER,
+            sender_nick="穆轩", conversation_id=conversation, conversation_type=ctype))
+
+    def test_the_approver_can_allow_the_conversation_they_are_in(self):
+        # It has to work from somewhere not yet listed — that is the entire point
+        # — so it is exempt from the allow-list and gated on the approver instead.
+        reply = self._say("/allow")
+        self.assertEqual(self.allowed, [("cid-new", False)])
+        self.assertIn("白名单", reply)
+
+    def test_nobody_else_can(self):
+        self._say("/allow", sender="somebody")
+        self.assertEqual(self.allowed, [])
+
+    def test_a_private_chat_is_recorded_as_one(self):
+        # The ids do not say which is which, and a card sent to the group endpoint
+        # with a private id is accepted and never delivered.
+        self._say("/allow", ctype="1")
+        self.assertEqual(self.allowed, [("cid-new", True)])
+
+    def test_it_takes_effect_immediately(self):
+        self._say("/allow")
+        self.assertIn("cid-new", self.brain.conversations)
+        # A command that was ignored a moment ago now answers.
+        self.assertTrue(self._say("/ping"))
+
+    def test_deny_removes_it(self):
+        self._say("/allow")
+        self._say("/deny")
+        self.assertEqual(self.denied, ["cid-new"])
+        self.assertNotIn("cid-new", self.brain.conversations)
+
+    def test_an_unlisted_conversation_still_ignores_everything_else(self):
+        self.assertEqual(self._say("/ls"), "")
+        self.assertEqual(self._say("做个东西", sender="somebody"), "")
+
+    def test_a_machine_with_no_writable_config_says_so(self):
+        self.brain.allow_conversation = None
+        self.assertIn("加不了", self._say("/allow"))

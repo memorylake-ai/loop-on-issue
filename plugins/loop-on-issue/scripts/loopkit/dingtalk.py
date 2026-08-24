@@ -121,6 +121,66 @@ def conversations(env: Dict[str, str]) -> List[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
+def _rewrite(path: str, updates: Dict[str, str]) -> str:
+    """Set keys in place, keeping everything else in the file exactly as it was."""
+    import os as _os
+
+    lines = []
+    if _os.path.isfile(path):
+        with open(path) as fh:
+            lines = [
+                line for line in fh.read().splitlines()
+                if not any(line.strip().startswith(key) for key in updates)
+            ]
+    else:
+        directory = _os.path.dirname(path)
+        if directory:
+            _os.makedirs(directory, exist_ok=True)
+    for key, value in updates.items():
+        lines.append('{}="{}"'.format(key, value))
+    fd = _os.open(path, _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)
+    with _os.fdopen(fd, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    # The mode argument only applies when the file is *created*; this file holds a
+    # client secret, so tighten it whatever it was before.
+    _os.chmod(path, 0o600)
+    return path
+
+
+def allow_conversation(path: str, conversation_id: str, private: bool = False) -> str:
+    """Add a conversation to the allow-list, keeping the ones already there.
+
+    Appending by hand to a comma-separated string is how an existing entry gets
+    dropped, and the drop is silent until somebody's group goes quiet.
+
+    `private` records that this one is a one-to-one chat. It cannot be inferred —
+    the ids look alike — and a card sent to the group endpoint with a private id
+    is accepted and never delivered.
+    """
+    env = load_env([path], environ={})
+    listed = conversations(env)
+    if conversation_id not in listed:
+        listed.append(conversation_id)
+    updates = {"LOOP_DINGTALK_CONVERSATIONS": ",".join(listed)}
+    dms = _dm_conversations(env)
+    if private and conversation_id not in dms:
+        dms.append(conversation_id)
+        updates["LOOP_DINGTALK_DM_CONVERSATIONS"] = ",".join(dms)
+    elif dms:
+        updates["LOOP_DINGTALK_DM_CONVERSATIONS"] = ",".join(dms)
+    return _rewrite(path, updates)
+
+
+def deny_conversation(path: str, conversation_id: str) -> str:
+    env = load_env([path], environ={})
+    return _rewrite(path, {
+        "LOOP_DINGTALK_CONVERSATIONS": ",".join(
+            c for c in conversations(env) if c != conversation_id),
+        "LOOP_DINGTALK_DM_CONVERSATIONS": ",".join(
+            c for c in _dm_conversations(env) if c != conversation_id),
+    })
+
+
 def set_enabled(path: str, on: bool) -> str:
     """Flip the switch in place, creating the file if it does not exist yet."""
     import os as _os

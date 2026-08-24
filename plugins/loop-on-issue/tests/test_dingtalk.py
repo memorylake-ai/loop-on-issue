@@ -336,3 +336,62 @@ class OutboundTargeting(unittest.TestCase):
         client.send("t", "b", conversation_id="cid-group")
         send = [c for c in self.calls if "Messages" in c["url"]][0]
         self.assertIn("groupMessages", send["url"])
+
+
+class EditingTheAllowList(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="loop-allow-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "dingtalk.env")
+        with open(self.path, "w") as fh:
+            fh.write('DINGTALK_CLIENT_ID="keep"\nLOOP_DINGTALK_CONVERSATIONS="cid-a"\n')
+
+    def _env(self):
+        return dingtalk.load_env([self.path], environ={})
+
+    def test_adding_appends_rather_than_replaces(self):
+        # Hand-editing a comma-separated string is how the existing entry gets
+        # dropped, and the drop is silent until somebody's group goes quiet.
+        dingtalk.allow_conversation(self.path, "cid-b")
+        self.assertEqual(dingtalk.conversations(self._env()), ["cid-a", "cid-b"])
+
+    def test_adding_twice_does_not_duplicate(self):
+        dingtalk.allow_conversation(self.path, "cid-b")
+        dingtalk.allow_conversation(self.path, "cid-b")
+        self.assertEqual(dingtalk.conversations(self._env()), ["cid-a", "cid-b"])
+
+    def test_everything_else_in_the_file_survives(self):
+        dingtalk.allow_conversation(self.path, "cid-b")
+        self.assertEqual(self._env()["DINGTALK_CLIENT_ID"], "keep")
+
+    def test_a_private_chat_is_marked_as_one(self):
+        dingtalk.allow_conversation(self.path, "cid-dm", private=True)
+        env = self._env()
+        self.assertIn("cid-dm", dingtalk.conversations(env))
+        self.assertIn("cid-dm", dingtalk._dm_conversations(env))
+
+    def test_a_group_is_not_marked_private(self):
+        dingtalk.allow_conversation(self.path, "cid-b")
+        self.assertNotIn("cid-b", dingtalk._dm_conversations(self._env()))
+
+    def test_removing(self):
+        dingtalk.allow_conversation(self.path, "cid-b")
+        dingtalk.deny_conversation(self.path, "cid-a")
+        self.assertEqual(dingtalk.conversations(self._env()), ["cid-b"])
+
+    def test_removing_also_clears_the_private_marking(self):
+        dingtalk.allow_conversation(self.path, "cid-dm", private=True)
+        dingtalk.deny_conversation(self.path, "cid-dm")
+        self.assertNotIn("cid-dm", dingtalk._dm_conversations(self._env()))
+
+    def test_removing_something_absent_is_not_an_error(self):
+        dingtalk.deny_conversation(self.path, "never-there")
+
+    def test_the_file_stays_owner_only(self):
+        dingtalk.allow_conversation(self.path, "cid-b")
+        self.assertEqual(oct(os.stat(self.path).st_mode & 0o777), "0o600")
+
+    def test_a_file_that_does_not_exist_yet_is_created(self):
+        fresh = os.path.join(self.dir, "new.env")
+        dingtalk.allow_conversation(fresh, "cid-x")
+        self.assertEqual(dingtalk.conversations(dingtalk.load_env([fresh], environ={})), ["cid-x"])
