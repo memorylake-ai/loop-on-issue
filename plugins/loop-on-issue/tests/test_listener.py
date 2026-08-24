@@ -303,3 +303,42 @@ class Brains(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DecoratedCommands(unittest.TestCase):
+    """Commands survive being copied out of a rendered message.
+
+    Replies offer options as pasteable commands wrapped in backticks. Copying the
+    rendered line takes the backticks with it, and the leading one stopped the
+    command being recognised at all — so an approval was filed as a brand new
+    requirement, and the thing it meant to approve stayed pending.
+    """
+
+    def test_backticks_around_the_whole_command(self):
+        self.assertEqual(listener.parse_command("`同意 R20260824-05`")[0], "approve")
+
+    def test_backticks_and_a_trailing_rendered_arrow(self):
+        name, rest = listener.parse_command(
+            "`同意 R20260824-05 demo-gh` → `iDonal/demo-project`")
+        self.assertEqual(name, "approve")
+        self.assertTrue(rest.startswith("R20260824-05 demo-gh"))
+
+    def test_a_backticked_slash_command(self):
+        self.assertEqual(listener.parse_command("`/ls`")[0], "ls")
+
+    def test_bold_markers(self):
+        self.assertEqual(listener.parse_command("**同意 R1**")[0], "approve")
+
+    def test_a_leading_bullet_from_a_copied_list_item(self):
+        self.assertEqual(listener.parse_command("- `同意 R1`")[0], "approve")
+
+    def test_plain_text_is_still_not_a_command(self):
+        self.assertIsNone(listener.parse_command("给 README 加一段说明")[0])
+
+    def test_a_requirement_that_merely_contains_backticks_stays_a_requirement(self):
+        # Stripping decoration must not turn prose into a command.
+        self.assertIsNone(listener.parse_command("把 `foo()` 改成 `bar()`")[0])
+
+    def test_the_arrow_and_what_follows_do_not_corrupt_the_target(self):
+        _, rest = listener.parse_command("`同意 R1 demo-gh` → `owner/name`")
+        self.assertNotIn("→", rest.split(" ")[0])

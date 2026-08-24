@@ -76,6 +76,13 @@ DEFAULTS: Dict[str, Any] = {
     # retired. Approved ones are never expired — that would pull work out from
     # under the agent holding it.
     "intake_ttl": 604800,
+    # Chat-raised jobs running at once. Bounded globally and serialised per
+    # repository: two agents in one checkout fight over git state, two in
+    # different checkouts do not.
+    "max_parallel_jobs": 2,
+    # How long one such job may run before it is stopped. Short enough that a job
+    # which has stopped making progress does not hold a slot all afternoon.
+    "job_timeout": 1800,
 }
 
 _ENUMS = {
@@ -84,7 +91,7 @@ _ENUMS = {
     "template_lang": ("en", "zh"),
 }
 
-_POSITIVE_INTS = ("max_parallel", "session_timeout")
+_POSITIVE_INTS = ("max_parallel", "session_timeout", "max_parallel_jobs", "job_timeout")
 _NON_NEGATIVE_INTS = ("ask_wait", "intake_ttl")
 _LISTS = ("env_files",)
 _STRINGS = (

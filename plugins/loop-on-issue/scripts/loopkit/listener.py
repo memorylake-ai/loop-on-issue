@@ -40,7 +40,7 @@ INTAKE = "intake"
 #: Approving a requirement and starting a session on an issue are the same class
 #: of act — both put an unattended agent to work — so they sit behind the same
 #: gate. Everything else, answering included, is open to the conversation.
-APPROVER_ONLY = ("approve", "reject", "dev", "repo")
+APPROVER_ONLY = ("approve", "reject", "dev", "repo", "cancel")
 
 #: The one command an unlisted conversation may run. Without it the allow-list is
 #: a bootstrap deadlock: you cannot fill in a conversationId without first being
@@ -60,6 +60,7 @@ _ALIASES = {
     "r": "r", "req": "r",
     "repos": "repos", "repo": "repo",
     "dev": "dev", "go": "dev", "start": "dev",
+    "cancel": "cancel", "stop": "cancel", "kill": "cancel",
     "approve": "approve", "ok": "approve",
     "reject": "reject",
     "report": "report",
@@ -76,6 +77,15 @@ _BARE_COMMANDS = {
 
 _MENTION_RE = re.compile(r"@[^\s@]+\s*")
 _CONFIRM_RE = re.compile(r"(?:^|\s)confirm(?:\s|$)", re.IGNORECASE)
+
+#: Decoration a command picks up on its way through a rendered message. Replies
+#: offer options as pasteable commands in backticks, and copying the rendered
+#: line brings the backticks along — the leading one stopped the command being
+#: recognised at all, so an approval was filed as a brand new requirement while
+#: the thing it approved stayed pending.
+_LEADING_JUNK = re.compile(r"^[\s\-*_`>•·]+")
+#: A copied option line trails its rendered explanation: `cmd` → `result`.
+_TRAILING_RENDER = re.compile(r"\s*[`\s]*(?:→|->|=>)\s*.*$")
 
 
 @dataclass
@@ -122,15 +132,34 @@ def strip_mention(text: str) -> str:
 
 
 def parse_command(text: str) -> Tuple[Optional[str], str]:
-    """`(canonical name, the rest)`, or `(None, text)` when it is not a command."""
-    text = strip_mention(text)
-    if text.startswith("/"):
-        head, _, rest = text[1:].strip().partition(" ")
-        return _ALIASES.get(head.lower(), head.lower()), rest.strip()
-    head, _, rest = text.partition(" ")
-    if head in _BARE_COMMANDS:
-        return _BARE_COMMANDS[head], rest.strip()
-    return None, text
+    """`(canonical name, the rest)`, or `(None, text)` when it is not a command.
+
+    Tolerant of decoration, because the decoration is ours: a message that offers
+    `同意 R1 demo-gh` as a tappable option gets copied back with its backticks and
+    its rendered `→ owner/name` tail attached.
+
+    Only the *command word* is un-decorated. Prose that merely contains backticks
+    stays prose — stripping enough to recognise a command must not be enough to
+    turn a requirement into one.
+    """
+    original = strip_mention(text)
+    candidate = _LEADING_JUNK.sub("", original)
+
+    if candidate.startswith("/"):
+        head, _, rest = candidate[1:].strip().partition(" ")
+        head = head.strip("`*_")
+        return _ALIASES.get(head.lower(), head.lower()), _clean_args(rest)
+
+    head, _, rest = candidate.partition(" ")
+    if head.strip("`*_") in _BARE_COMMANDS:
+        return _BARE_COMMANDS[head.strip("`*_")], _clean_args(rest)
+    return None, original
+
+
+def _clean_args(rest: str) -> str:
+    """Drop the rendered tail a copied option line brings with it."""
+    rest = _TRAILING_RENDER.sub("", rest or "")
+    return rest.strip().strip("`*_").strip()
 
 
 def needs_confirm(rest: str) -> Tuple[bool, str]:
@@ -213,6 +242,7 @@ HELP = md(
         "`拒绝 <ID> <理由>` — 驳回，也可写 `/reject`",
         "`/dev <issue> [仓库]` — 让 agent 现在就去开发这个 issue",
         "`/repo <ID> <仓库>` — 改某条需求归哪个仓库（开跑前有效）",
+        "`/cancel <ID>` — 停掉一个卡住的任务，把 worker 释放出来",
     ),
     "**看板维护**",
     bullets(
@@ -244,6 +274,7 @@ class Brain:
         queue_label: str = "loop",
         assignee: Optional[str] = None,
         enqueue: Optional[Callable[[Any], None]] = None,
+        cancel_job: Optional[Callable[[str, str], Any]] = None,
         last_report: str = "",
     ):
         self.forge_for = forge_for
@@ -258,6 +289,10 @@ class Brain:
         # Called with an approved Request. Injected so the Brain never owns a
         # subprocess and stays testable without one.
         self.enqueue = enqueue or (lambda request: None)
+        # Injected by whoever owns the processes; without one, cancelling can
+        # still mark the record, which is better than nothing but does not free
+        # the worker.
+        self.cancel_job = cancel_job
         self.last_report = last_report
 
     @property
@@ -651,6 +686,21 @@ class Brain:
             return "{}".format(exc).replace("is already", "已经是")
         self.store.save(request)
         return "🚫 **{}** 已驳回：{}".format(request.id, reason.strip())
+
+    def _cmd_cancel(self, rest, inbound):
+        """Stop a job that is not going anywhere, and free the slot it holds."""
+        request_id, _ = _split_id(rest)
+        request = self.store.get(request_id) if request_id else None
+        if not request:
+            return md("用法：`/cancel <ID>`", "`/p` 看在办的。")
+        if self.cancel_job is None:
+            if request.status not in intake_mod.OPEN:
+                return "**{}** 已经是 {}。".format(request.id, request.status)
+            request.cancel(by=inbound.sender_nick)
+            self.store.save(request)
+            return "**{}** 已标记取消（本机没有执行器，进程未必停了）。".format(request.id)
+        ok, detail = self.cancel_job(request.id, inbound.sender_nick or "")
+        return ("🛑 {}".format(detail) if ok else detail)
 
     def _cmd_dev(self, rest, inbound):
         """Put an agent on one existing issue, now.

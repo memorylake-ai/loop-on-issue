@@ -388,3 +388,47 @@ class Questions(unittest.TestCase):
         self.req.ask("哪种？", ["a"])
         self.store.save(self.req)
         self.assertEqual(len(self.store.get("R1").questions), 1)
+
+
+class Cancelling(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="loop-intake-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.store = intake_mod.Store(self.dir)
+
+    def _running(self):
+        req = intake_mod.Request(id="R1", text="x")
+        req.approve(by="J", auto=True)
+        req.start(session="s", pid=4242)
+        return self.store.save(req)
+
+    def test_the_process_is_recorded_so_it_can_be_stopped(self):
+        # A status field alone relabels a stuck job without freeing the worker it
+        # is holding.
+        self._running()
+        self.assertEqual(self.store.get("R1").pid, 4242)
+
+    def test_cancelling_records_who(self):
+        req = self._running()
+        req.cancel(by="穆轩")
+        self.store.save(req)
+        found = self.store.get("R1")
+        self.assertEqual(found.status, intake_mod.CANCELLED)
+        self.assertIn("穆轩", found.error)
+
+    def test_cancelling_clears_the_process(self):
+        req = self._running()
+        req.cancel()
+        self.assertEqual(req.pid, 0)
+
+    def test_a_cancelled_job_is_not_open(self):
+        req = self._running()
+        req.cancel()
+        self.store.save(req)
+        self.assertEqual(self.store.by_status(*intake_mod.OPEN), [])
+
+    def test_running_for_measures_only_a_running_job(self):
+        req = self._running()
+        self.assertGreaterEqual(req.running_for, 0.0)
+        req.cancel()
+        self.assertEqual(req.running_for, 0.0)

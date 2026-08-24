@@ -426,3 +426,69 @@ class Redirecting(Base):
                                       msg_id="m2", sender=self.APPROVER))
         self.assertIn("widget", reply)
         self.assertEqual(self.store.get(request.id).repo, "acme/widget")
+
+
+class Cancelling(Base):
+    """A queue with no way out of a stuck job is a queue that stops."""
+
+    def setUp(self):
+        Base.setUp(self)
+        self.cancelled = []
+
+        def cancel(request_id, by):
+            self.cancelled.append((request_id, by))
+            request = self.store.get(request_id)
+            if request and request.status in intake_mod.OPEN:
+                request.cancel(by=by)
+                self.store.save(request)
+                return True, "已停掉 {}".format(request_id)
+            return False, "{} 没有在办".format(request_id)
+
+        self.brain.cancel_job = cancel
+
+    def _running(self):
+        self.brain.handle(msg(text="做个东西", sender=self.APPROVER))
+        request = self.store.all()[0]
+        self.brain.handle(msg(text="同意 " + request.id, msg_id="ok", sender=self.APPROVER))
+        request = self.store.get(request.id)
+        request.start(session="s", pid=4242)
+        self.store.save(request)
+        return request
+
+    def test_the_owner_can_stop_a_running_job(self):
+        request = self._running()
+        reply = self.brain.handle(msg(text="/cancel " + request.id, msg_id="m2",
+                                      sender=self.APPROVER))
+        self.assertEqual(self.store.get(request.id).status, intake_mod.CANCELLED)
+        self.assertIn(request.id, reply)
+
+    def test_it_goes_through_whoever_owns_the_process(self):
+        # Marking the record without stopping the process relabels a stuck job
+        # while it still holds the worker.
+        request = self._running()
+        self.brain.handle(msg(text="/cancel " + request.id, msg_id="m2", sender=self.APPROVER))
+        self.assertEqual(self.cancelled, [(request.id, "张三")])
+
+    def test_nobody_else_can(self):
+        request = self._running()
+        reply = self.brain.handle(msg(text="/cancel " + request.id, msg_id="m2",
+                                      sender="somebody"))
+        self.assertIn("只有", reply)
+        self.assertEqual(self.store.get(request.id).status, intake_mod.RUNNING)
+
+    def test_cancelling_something_already_finished_says_so(self):
+        request = self._running()
+        request.finish(issues=["https://f/1"])
+        self.store.save(request)
+        reply = self.brain.handle(msg(text="/cancel " + request.id, msg_id="m2",
+                                      sender=self.APPROVER))
+        self.assertIn("没有在办", reply)
+
+    def test_an_unknown_id_shows_the_usage(self):
+        reply = self.brain.handle(msg(text="/cancel R20260101-99", sender=self.APPROVER))
+        self.assertIn("/p", reply)
+
+    def test_a_cancelled_job_leaves_the_open_queue(self):
+        request = self._running()
+        self.brain.handle(msg(text="/cancel " + request.id, msg_id="m2", sender=self.APPROVER))
+        self.assertIn("没有在办", self.brain.handle(msg(text="/p", msg_id="m3")))

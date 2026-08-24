@@ -32,6 +32,7 @@ DONE = "done"
 REJECTED = "rejected"
 FAILED = "failed"
 EXPIRED = "expired"
+CANCELLED = "cancelled"
 
 #: States that still hold a claim on somebody's attention.
 OPEN = (PENDING, APPROVED, RUNNING)
@@ -76,6 +77,10 @@ class Request:
     #: once — a second start collides with the session the first one left behind
     #: — so anything past the first has to resume instead.
     attempts: int = 0
+    #: The agent process, while one is running. Recorded so a job that stops
+    #: making progress can actually be stopped — a status field alone lets you
+    #: relabel a stuck job without freeing the worker it is holding.
+    pid: int = 0
     #: Questions the agent put to a human while working, with their answers.
     #: A decomposition has no issue to hold them, and it is the job that most
     #: needs to ask: most ambiguity, least to check a reading against.
@@ -112,13 +117,25 @@ class Request:
         self.rejected_reason = reason
         return self
 
-    def start(self, session: str = "") -> "Request":
+    def start(self, session: str = "", pid: int = 0) -> "Request":
         self.status = RUNNING
         self.started_at = time.time()
         self.attempts += 1
+        self.pid = pid
         if session:
             self.session = session
         return self
+
+    def cancel(self, by: str = "") -> "Request":
+        self.status = CANCELLED
+        self.finished_at = time.time()
+        self.error = "cancelled{}".format(" by " + by if by else "")
+        self.pid = 0
+        return self
+
+    @property
+    def running_for(self) -> float:
+        return (time.time() - self.started_at) if self.status == RUNNING and self.started_at else 0.0
 
     @property
     def resuming(self) -> bool:

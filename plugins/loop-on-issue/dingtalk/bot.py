@@ -75,34 +75,94 @@ def forge_factory(registry: repos_mod.Registry):
 
 
 class Executor:
-    """Runs approved work, one job at a time.
+    """Runs approved work: several jobs at once, one per repository.
 
-    Serial on purpose. Two agents in the same checkout fight over git state, and
-    two anywhere compete for the same quota; decomposing a requirement is not
-    urgent enough to be worth either. Jobs are durable in the intake store, so a
-    listener that dies mid-queue picks up where it left off.
+    Fully serial was the first design, for a good reason that turned out to be
+    narrower than the rule built on it: two agents in the *same checkout* fight
+    over git state. Two in different checkouts do not, and a single worker meant
+    one slow job stalled every other repository behind it — with a two-hour
+    timeout, for two hours.
+
+    So concurrency is bounded globally and serialised per repository. A worker
+    that finds a repository busy puts the job back and takes another rather than
+    blocking on the lock, or the parallelism would be lost to whichever job
+    happened to arrive first.
+
+    Jobs are durable in the intake store, so a listener that dies mid-queue picks
+    up where it left off — and a job whose process is gone is not "running" any
+    more, however its record reads.
     """
 
-    def __init__(self, store, registry, notify, timeout=7200):
+    def __init__(self, store, registry, notify, timeout=1800, workers=2):
+        import threading
+
         self.store = store
         self.registry = registry
         self.notify = notify
         self.timeout = timeout
+        self.workers = max(1, workers)
         self.queue = __import__("queue").Queue()
-        self._thread = None
+        self._threads = []
+        self._repo_locks = {}
+        self._locks_guard = threading.Lock()
+        self._processes = {}
+
+    def _repo_lock(self, repo):
+        import threading
+
+        with self._locks_guard:
+            if repo not in self._repo_locks:
+                self._repo_locks[repo] = threading.Lock()
+            return self._repo_locks[repo]
 
     def start(self):
         import threading
 
-        # Anything approved but never run — a crash, a restart — goes back in.
+        self._recover()
+        for index in range(self.workers):
+            thread = threading.Thread(target=self._worker, daemon=True,
+                                      name="loop-worker-{}".format(index + 1))
+            thread.start()
+            self._threads.append(thread)
+        log.info("executor started with %d worker(s), %ds timeout",
+                 self.workers, self.timeout)
+
+    def _recover(self):
+        """Requeue work that was approved or interrupted.
+
+        A record left at `running` belonged to a process this listener no longer
+        has; whether it died with the last listener or was killed, it is not
+        running now. Re-queueing is right, and leaving it labelled `running`
+        would make it invisible to every later recovery.
+        """
         for request in self.store.by_status(intake_mod.APPROVED, intake_mod.RUNNING):
-            log.info("recovering %s (%s)", request.id, request.status)
+            if request.status == intake_mod.RUNNING:
+                if _alive(request.pid):
+                    log.warning("%s is still running as pid %s elsewhere; leaving it",
+                                request.id, request.pid)
+                    continue
+                log.info("recovering %s (was running, process gone)", request.id)
+                request.status = intake_mod.APPROVED
+                request.pid = 0
+                self.store.save(request)
+            else:
+                log.info("recovering %s (%s)", request.id, request.status)
             self.queue.put(request.id)
-        self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._thread.start()
 
     def submit(self, request):
         self.queue.put(request.id)
+
+    def cancel(self, request_id, by=""):
+        """Stop a job and free the worker holding it."""
+        request = self.store.get(request_id)
+        if request is None:
+            return False, "找不到 {}".format(request_id)
+        if request.status not in intake_mod.OPEN:
+            return False, "{} 已经是 {}，没有在办".format(request_id, request.status)
+        killed = _kill(request.pid)
+        request.cancel(by=by)
+        self.store.save(request)
+        return True, ("已停掉 {}{}".format(request_id, "（进程已杀）" if killed else ""))
 
     def _worker(self):
         while True:
@@ -116,6 +176,21 @@ class Executor:
         request = self.store.get(request_id)
         if not request or request.status not in (intake_mod.APPROVED, intake_mod.RUNNING):
             return
+
+        lock = self._repo_lock(request.repo)
+        if not lock.acquire(blocking=False):
+            # Another job holds this checkout. Put it back and take something
+            # else; blocking here would spend a worker waiting.
+            log.info("%s waiting for %s", request.id, request.repo)
+            time.sleep(2)
+            self.queue.put(request_id)
+            return
+        try:
+            self._run_locked(request)
+        finally:
+            lock.release()
+
+    def _run_locked(self, request):
         entry = self.registry.get(request.repo)
         if not entry or not os.path.isdir(entry.path):
             request.fail("no local checkout registered for {}".format(request.repo))
@@ -280,6 +355,44 @@ class Executor:
         )
 
 
+def _alive(pid):
+    """Is that process still there?
+
+    A record saying `running` proves only what was true when it was written.
+    """
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _kill(pid):
+    """Stop a job's process group, politely then not.
+
+    The group, not the process: an agent spawns children — a build, a test run —
+    and killing only the parent leaves those holding the checkout.
+    """
+    if not _alive(pid):
+        return False
+    import signal
+
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(os.getpgid(int(pid)), sig)
+        except OSError:
+            try:
+                os.kill(int(pid), sig)
+            except OSError:
+                return True
+        time.sleep(1.5)
+        if not _alive(pid):
+            return True
+    return not _alive(pid)
+
+
 def _read_text(path):
     try:
         with open(path) as fh:
@@ -369,7 +482,9 @@ def run(env, repo_root):
             log.warning("could not announce: %s", exc)
 
     brain, registry, store, conf = make_brain(env, repo_root)
-    executor = Executor(store, registry, announce)
+    executor = Executor(store, registry, announce,
+                        timeout=conf.job_timeout, workers=conf.max_parallel_jobs)
+    brain.cancel_job = executor.cancel
     brain.enqueue = executor.submit
     executor.start()
 
