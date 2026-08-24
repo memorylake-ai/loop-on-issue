@@ -155,3 +155,41 @@ class EveryReply(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlaceholdersAreDistinguishable(unittest.TestCase):
+    """Two different things must not be told apart by letter case alone.
+
+    The help used `<ID>` for a requirement (R20260824-01) and `<id>` for an issue
+    number (612). Nobody reads case as meaning, and on a phone it is invisible —
+    `/r <ID>` and `/i <id>` sat next to each other differing by one capital.
+    """
+
+    def test_no_placeholder_differs_from_another_only_by_case(self):
+        import re
+
+        found = set(re.findall(r"<[^>]+>", listener.HELP))
+        lowered = {}
+        for name in found:
+            key = name.lower()
+            lowered.setdefault(key, set()).add(name)
+        clashes = {k: v for k, v in lowered.items() if len(v) > 1}
+        self.assertEqual(clashes, {}, "case-only distinctions: {}".format(clashes))
+
+    def test_the_two_kinds_of_number_are_named_differently(self):
+        # A requirement id and an issue number are not interchangeable anywhere.
+        self.assertIn("R编号", listener.HELP)
+        self.assertIn("issue 号", listener.HELP)
+
+    def test_the_help_shows_what_each_looks_like(self):
+        # The shapes are unmistakable; showing them beats naming them.
+        self.assertIn("R20260824-01", listener.HELP)
+        self.assertIn("#612", listener.HELP)
+
+    def test_issue_commands_all_use_the_same_placeholder(self):
+        import re
+
+        for line in listener.HELP.splitlines():
+            if "/dev" in line or "/i " in line or "/a " in line or "/skip" in line:
+                self.assertNotIn("<id>", line, line)
+                self.assertNotIn("<issue>", line, line)

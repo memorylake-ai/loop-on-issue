@@ -221,33 +221,38 @@ HELP = md(
         "直接发一句话 = **提需求**（不用加 `/`）",
         "作答请**引用回复**那张问题卡片",
     ),
+    "**两种编号，别弄混**",
+    bullets(
+        "`<R编号>` — 一条**需求**，形如 `R20260824-01`",
+        "`<issue 号>` — 一个 **issue**，形如 `#612` 或 `612`",
+    ),
     "**提需求 / 查看**",
     bullets(
         "`/new [仓库] <需求>` — 提需求，与直接发一句话等价",
-        "`/p` — 待审批的需求",
-        "`/r <ID>` — 某条需求：状态 · 审批 · 产物",
+        "`/p` — 在办的需求（待审批 · 排队中 · 执行中）",
+        "`/r <R编号>` — 某条需求：状态 · 审批 · 产物",
         "`/q` — 待答问题",
         "`/ls [状态]` — issue 队列",
-        "`/i <id>` — 某个 issue",
+        "`/i <issue 号>` — 某个 issue",
         "`/repos` — 本机服务的仓库",
     ),
     "**作答**",
     bullets(
         "引用回复问题卡片（可一次回多个编号）",
-        "`/a <id> <文本>` — 直接答某个 issue",
+        "`/a <issue 号> <文本>` — 直接答某个 issue",
     ),
     "**仅审批人**",
     bullets(
-        "`同意 <ID> [仓库] [备注]` — 批准，也可写 `/approve`",
-        "`拒绝 <ID> <理由>` — 驳回，也可写 `/reject`",
-        "`/dev <issue> [仓库]` — 让 agent 现在就去开发这个 issue",
-        "`/repo <ID> <仓库>` — 改某条需求归哪个仓库（开跑前有效）",
-        "`/cancel <ID>` — 停掉一个卡住的任务，把 worker 释放出来",
+        "`同意 <R编号> [仓库] [备注]` — 批准，也可写 `/approve`",
+        "`拒绝 <R编号> <理由>` — 驳回，也可写 `/reject`",
+        "`/repo <R编号> <仓库>` — 改归哪个仓库（开跑前有效）",
+        "`/cancel <R编号>` — 停掉卡住的任务，释放 worker",
+        "`/dev <issue 号> [仓库]` — 让 agent 现在就去开发这个 issue",
     ),
     "**看板维护**",
     bullets(
-        "`/skip <id> confirm <理由>` — 退掉一条 issue",
-        "`/requeue <id> confirm` — 放回队列",
+        "`/skip <issue 号> confirm <理由>` — 退掉一条 issue",
+        "`/requeue <issue 号> confirm` — 放回队列",
         "`/report` — 重发上轮报告",
     ),
     "**其他**",
@@ -521,7 +526,7 @@ class Brain:
     def _cmd_i(self, rest, inbound):
         number = _first_int(rest)
         if number is None:
-            return "用法：`/i <id>`"
+            return "用法：`/i <issue 号>`，例如 `/i 612`"
         forge = self.forge_for(self.default_repo)
         try:
             issue = forge.get_issue(number)
@@ -543,7 +548,7 @@ class Brain:
         number = _first_int(rest)
         text = re.sub(r"^\s*#?\d+\s*", "", rest or "", count=1).strip()
         if number is None or not text:
-            return "用法：`/a <id> <你的答复>`"
+            return "用法：`/a <issue 号> <你的答复>`，例如 `/a 612 用第二个方案`"
         return self._answer(Action(ANSWER), inbound, number=number, repo=self.default_repo, text=text)
 
     def _cmd_new(self, rest, inbound):
@@ -556,7 +561,7 @@ class Brain:
         request_id, remainder = _split_id(rest)
         request = self.store.get(request_id) if request_id else None
         if not request:
-            return "用法：`/repo <ID> <仓库名字>`"
+            return "用法：`/repo <R编号> <仓库名字>`，例如 `/repo R20260824-01 demo-gl`"
         entry = self.registry.get((remainder or "").strip().split(" ")[0])
         if not entry:
             return md(
@@ -612,7 +617,11 @@ class Brain:
     def _cmd_r(self, rest, inbound):
         request = self.store.get((rest or "").strip().split(" ")[0])
         if not request:
-            return "找不到 `{}`。用 `/p` 看待审批的。".format((rest or "").strip())
+            return md(
+            "找不到需求 `{}`。".format((rest or "").strip() or "（空）"),
+            bullets("需求编号形如 `R20260824-01`；issue 号请用 `/i <号>`",
+                    "`/p` 看在办的需求"),
+        )
         facts = ["提出：{}".format(request.requester or "?")]
         if request.approved_by:
             facts.append("审批：{}{}".format(
@@ -650,7 +659,7 @@ class Brain:
     def _cmd_approve(self, rest, inbound):
         request_id, remainder = _split_id(rest)
         if not request_id:
-            return "用法：`同意 <ID> [仓库] [备注]`"
+            return "用法：`同意 <R编号> [仓库] [备注]`，例如 `同意 R20260824-01`"
         request = self.store.get(request_id)
         if not request:
             return "找不到 `{}`。用 `/p` 看待审批的。".format(request_id)
@@ -674,7 +683,7 @@ class Brain:
     def _cmd_reject(self, rest, inbound):
         request_id, reason = _split_id(rest)
         if not request_id:
-            return "用法：`拒绝 <ID> <理由>`"
+            return "用法：`拒绝 <R编号> <理由>`，例如 `拒绝 R20260824-01 已经做过了`"
         request = self.store.get(request_id)
         if not request:
             return "找不到 `{}`。".format(request_id)
@@ -692,7 +701,7 @@ class Brain:
         request_id, _ = _split_id(rest)
         request = self.store.get(request_id) if request_id else None
         if not request:
-            return md("用法：`/cancel <ID>`", "`/p` 看在办的。")
+            return md("用法：`/cancel <R编号>`，例如 `/cancel R20260824-01`", "`/p` 看在办的。")
         if self.cancel_job is None:
             if request.status not in intake_mod.OPEN:
                 return "**{}** 已经是 {}。".format(request.id, request.status)
@@ -711,7 +720,7 @@ class Brain:
         """
         number = _first_int(rest)
         if number is None:
-            return "用法：`/dev <issue 号> [仓库]`"
+            return "用法：`/dev <issue 号> [仓库]`，例如 `/dev 612 demo-gh`"
         _, remainder = _split_id(rest)
         repo, _ = self._split_repo(re.sub(r"^\s*#?\d+\s*", "", rest or "", count=1))
         entry = self.registry.get(repo) if repo else self.registry.default
@@ -753,7 +762,7 @@ class Brain:
         pending_confirm, cleaned = needs_confirm(rest)
         reason = re.sub(r"^\s*#?\d+\s*", "", cleaned, count=1).strip()
         if number is None:
-            return "用法：`/skip <id> confirm <理由>`"
+            return "用法：`/skip <issue 号> confirm <理由>`"
         if pending_confirm:
             return "这会把 #{} 永久退出队列。确认请发：`/skip {} confirm {}`".format(number, number, reason)
         if len(reason) < 15:
@@ -769,7 +778,7 @@ class Brain:
         number = _first_int(rest)
         pending_confirm, _ = needs_confirm(rest)
         if number is None:
-            return "用法：`/requeue <id> confirm`"
+            return "用法：`/requeue <issue 号> confirm`"
         if pending_confirm:
             return "这会清掉 #{} 的状态前缀，下一轮可能被重新认领。确认请发：`/requeue {} confirm`".format(
                 number, number)
