@@ -55,6 +55,17 @@ class Claiming(CLITest):
         self.assertEqual(code, 2)
         self.assertIn("already in state WORKING", stderr)
 
+    def test_a_codex_issue_is_not_handed_a_derived_session_id(self):
+        # A derived id looks authoritative and resumes into a session that never
+        # existed; codex ids only ever come from what a previous run recorded.
+        self.cli.route("api", "--method GET", "/issues/12",
+                       stdout=self.issue(labels=("loop", "runner::codex")), once=True)
+        self.cli.route("api", "PATCH", "/issues/12", stdout=self.issue())
+        self.cli.route("api", "/issues/12", stdout=self.issue(title="[CLAIMED] fix drive URI"))
+        code, stdout, _ = self.run_cli("claim", "--id", "12", "--assignee", "muxuan")
+        payload = json.loads(stdout)
+        self.assertEqual((code, payload["runner"], payload["session_id"]), (0, "codex", None))
+
     def test_an_issue_that_lost_the_queue_label_is_refused(self):
         self.cli.route("api", "/issues/12", stdout=self.issue(labels=("bug",)))
         self.assertEqual(self.run_cli("claim", "--id", "12")[0], 2)

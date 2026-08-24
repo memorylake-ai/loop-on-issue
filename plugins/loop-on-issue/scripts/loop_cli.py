@@ -40,6 +40,18 @@ def out(payload, pretty=True):
     print(json.dumps(payload, indent=2 if pretty else None, ensure_ascii=False))
 
 
+def resumable_id(repo, number, name):
+    """The derived session id, or None for a runner that assigns its own.
+
+    Emitting a derived id for a codex issue would be worse than emitting nothing:
+    it looks authoritative, and resuming with it lands in a session that never
+    existed. Ask `session-id` for those — it reads the recorded one.
+    """
+    if name != runner_mod.CLAUDE:
+        return None
+    return runner_mod.session_id(repo, number)
+
+
 def read_text(inline, path):
     if path:
         return sys.stdin.read() if path == "-" else open(path).read()
@@ -174,6 +186,7 @@ def cmd_list(args):
     buckets = {k: [] for k in ("UNCLAIMED",) + state_mod.STATES}
     for issue in issues:
         st, base = state_mod.split_state(issue.title)
+        name = runner_mod.select(None, issue.labels, ctx.config.runner)
         buckets[st or "UNCLAIMED"].append(
             {
                 "id": issue.number,
@@ -183,8 +196,8 @@ def cmd_list(args):
                 "url": issue.url,
                 "updated_at": issue.updated_at,
                 "labels": issue.labels,
-                "runner": runner_mod.select(None, issue.labels, ctx.config.runner),
-                "session_id": runner_mod.session_id(ctx.repo, issue.number),
+                "runner": name,
+                "session_id": resumable_id(ctx.repo, issue.number, name),
             }
         )
     if args.active_only:
@@ -229,9 +242,9 @@ def cmd_claim(args):
     if after != "CLAIMED":
         raise Precondition("#{} claim did not stick (now {}); another run won".format(args.id, after))
 
-    out({"id": args.id, "state": "CLAIMED", "title": after_base,
-         "runner": runner_mod.select(None, issue.labels, ctx.config.runner),
-         "session_id": runner_mod.session_id(ctx.repo, args.id)}, pretty=False)
+    name = runner_mod.select(None, issue.labels, ctx.config.runner)
+    out({"id": args.id, "state": "CLAIMED", "title": after_base, "runner": name,
+         "session_id": resumable_id(ctx.repo, args.id, name)}, pretty=False)
     return 0
 
 
