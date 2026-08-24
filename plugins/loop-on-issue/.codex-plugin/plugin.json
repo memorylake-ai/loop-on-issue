@@ -1,0 +1,35 @@
+{
+  "name": "loop-on-issue",
+  "version": "0.1.0",
+  "description": "Unattended issue-to-PR pipeline for GitHub (gh) and GitLab (glab): decompose requirements into executable issues, drain a labelled queue with one resumable agent session per issue, and submit the change request.",
+  "author": {
+    "name": "memorylake-ai",
+    "url": "https://github.com/memorylake-ai"
+  },
+  "homepage": "https://github.com/memorylake-ai/loop-on-issue",
+  "repository": "https://github.com/memorylake-ai/loop-on-issue",
+  "license": "MIT",
+  "keywords": [
+    "github",
+    "gitlab",
+    "issues",
+    "pull-request",
+    "merge-request",
+    "automation",
+    "worktree"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Loop on Issue",
+    "shortDescription": "Queue an issue, get a pull request — on GitHub or GitLab",
+    "longDescription": "Decompose a requirement into issues an unattended agent can actually execute, drain the queue one resumable session per issue in its own git worktree, and open the pull request or merge request. Detects whether the repo lives on GitHub or GitLab and drives gh or glab accordingly. Ships a doctor that checks CLI install, authentication, labels and templates before anything runs.",
+    "developerName": "memorylake-ai",
+    "category": "Coding",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": [
+      "Check whether this repo is set up for the loop queue.",
+      "Break this requirement down into issues the swarm can pick up."
+    ],
+    "websiteURL": "https://github.com/memorylake-ai/loop-on-issue"
+  }
+}

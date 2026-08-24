@@ -1,0 +1,57 @@
+#!/bin/sh
+# Entry point for the loop-on-issue CLI.
+#
+# This wrapper exists because `python3` is not always safe to call directly.
+# A GUI launcher can export PYTHONHOME and PYTHONPATH pointing at its own bundled
+# runtime into every shell it spawns, and any interpreter that is not that exact
+# one then dies during startup, before a line of the script runs:
+#
+#     Fatal Python error: init_fs_encoding: failed to get the Python codec of
+#     the filesystem encoding / ModuleNotFoundError: No module named 'encodings'
+#
+# The script cannot defend against that — the interpreter fails before importing
+# anything — so the fix lives one level out: strip both variables, then use the
+# first candidate interpreter that actually boots.
+#
+# Arguments pass through unchanged and the exit code is preserved, which matters:
+# 0 / 2 / 1 are load-bearing for callers.
+
+set -eu
+
+# Resolve through symlinks before deriving our own directory. Invoked as
+# ~/.local/bin/loop, "$0" is the link, and dirname of it is a directory holding
+# no loop_cli.py — which is exactly how `init --link` broke the first time.
+# readlink -f is not portable to every macOS, so walk the chain by hand.
+self=$0
+while [ -L "$self" ]; do
+    target=$(readlink "$self")
+    case $target in
+        /*) self=$target ;;
+        *)  self=$(dirname -- "$self")/$target ;;
+    esac
+done
+here=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd)
+
+# A git worktree has no .venv of its own; --git-common-dir resolves to the main
+# checkout's .git, whose parent may. Falls through harmlessly outside a repo.
+common_dir=$(git rev-parse --git-common-dir 2>/dev/null || echo .)
+main_checkout=$(dirname "$(CDPATH= cd -- "$common_dir" 2>/dev/null && pwd || echo .)")
+
+for py in \
+    "${LOOP_PYTHON:-}" \
+    "$main_checkout/.venv/bin/python" \
+    "$(command -v python3 2>/dev/null || true)" \
+    /usr/bin/python3
+do
+    [ -n "$py" ] || continue
+    [ -x "$py" ] || continue
+    # Prove it boots before committing to it. Version floor is 3.9: macOS ships
+    # /usr/bin/python3 as 3.9, and the CLI is written to that floor.
+    if env -u PYTHONHOME -u PYTHONPATH "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+        exec env -u PYTHONHOME -u PYTHONPATH "$py" "$here/loop_cli.py" "$@"
+    fi
+done
+
+echo "loop: no usable Python 3.9+ interpreter found." >&2
+echo "      Set LOOP_PYTHON to one, e.g. LOOP_PYTHON=/usr/bin/python3" >&2
+exit 1

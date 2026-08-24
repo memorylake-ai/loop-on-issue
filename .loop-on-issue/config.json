@@ -1,0 +1,22 @@
+{
+  "forge": "auto",
+  "repo": null,
+  "queue_label": "loop",
+  "assignee": "iDonal",
+  "base_branch": "origin/main",
+  "push_remote": "origin",
+  "target_remote": "auto",
+  "runner": "claude",
+  "max_parallel": 2,
+  "session_timeout": 43200,
+  "worktree_dir": ".worktrees",
+  "template_lang": "en",
+  "verify_command": "plugins/loop-on-issue/run-tests.sh",
+  "env_files": [
+    ".env"
+  ],
+  "escalation_command": null,
+  "ask_wait": 0,
+  "intake_ttl": 604800,
+  "agent_model": "sonnet"
+}

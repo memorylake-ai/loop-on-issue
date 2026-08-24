@@ -1,0 +1,19 @@
+{
+  "name": "loop-on-issue",
+  "interface": {
+    "displayName": "Loop on Issue"
+  },
+  "plugins": [
+    {
+      "name": "loop-on-issue",
+      "source": {
+        "source": "local",
+        "path": "./plugins/loop-on-issue"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Engineering"
+    }
+  ]
+}

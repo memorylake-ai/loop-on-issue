@@ -1,0 +1,23 @@
+{
+  "name": "loop-on-issue",
+  "description": "Unattended issue-to-PR pipeline for GitHub and GitLab: queue an issue, an agent claims it, develops it in its own worktree, and opens the change request.",
+  "owner": {
+    "name": "memorylake-ai",
+    "url": "https://github.com/memorylake-ai"
+  },
+  "plugins": [
+    {
+      "name": "loop-on-issue",
+      "source": "./plugins/loop-on-issue",
+      "description": "Drain a labelled issue queue end to end — decompose requirements into executable issues, run one resumable agent session per issue, and submit the PR/MR. Works against GitHub via gh and GitLab via glab.",
+      "version": "0.1.0",
+      "author": {
+        "name": "memorylake-ai",
+        "url": "https://github.com/memorylake-ai"
+      },
+      "keywords": ["github", "gitlab", "issues", "pull-request", "merge-request", "automation", "swarm", "gh", "glab"],
+      "category": "workflow",
+      "license": "MIT"
+    }
+  ]
+}
