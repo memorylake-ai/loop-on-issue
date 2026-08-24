@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional
 from .errors import Precondition
 from .forge import Forge, did_you_mean, pick_cr, title_claims_issue
 from .models import ChangeRequest, Comment, Issue, Repo, ReviewThread
-from .proc import CommandError, run
+from .proc import CommandError, run, run_result
 
 _STATE_IN = {"opened": "open", "open": "open", "closed": "closed", "all": "all"}
 _STATE_OUT = {"open": "opened", "closed": "closed"}
@@ -315,15 +315,11 @@ class GitHub(Forge):
         cmd = ["gh", "auth", "status"]
         if self.repo.host and self.repo.host != "github.com":
             cmd += ["--hostname", self.repo.host]
-        try:
-            out = run(cmd, check=False)
-        except CommandError as exc:
-            return False, str(exc)
-        try:
-            run(cmd)
-        except CommandError as exc:
-            return False, (exc.stderr or str(exc)).strip()
-        return True, out.strip()
+        result = run_result(cmd)
+        # `gh auth status` prints its report to stderr on some versions and stdout
+        # on others, so both are considered.
+        detail = (result.stdout + "\n" + result.stderr).strip()
+        return result.ok, detail
 
     def permissions(self):
         try:

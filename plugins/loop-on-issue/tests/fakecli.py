@@ -41,13 +41,13 @@ printf "fake: no route matched: %s\n" "$joined" >&2
 exit 97
 '''
 
-_BIN_DIR: Optional[str] = None
+_BIN_DIRS: Dict[tuple, str] = {}
 
 
 def _bin_dir(names: Sequence[str]) -> str:
-    """The one directory of fake executables this process ever creates."""
-    global _BIN_DIR
-    if _BIN_DIR is None:
+    """A directory of fake executables, created once per distinct name set."""
+    key = tuple(names)
+    if key not in _BIN_DIRS:
         root = tempfile.mkdtemp(prefix="loop-fakecli-bin-")
         atexit.register(shutil.rmtree, root, True)
         for name in names:
@@ -55,14 +55,31 @@ def _bin_dir(names: Sequence[str]) -> str:
             with open(path, "w") as fh:
                 fh.write(_LAUNCHER)
             os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-        _BIN_DIR = root
-    return _BIN_DIR
+        _BIN_DIRS[key] = root
+    return _BIN_DIRS[key]
+
+
+def _minimal_path() -> str:
+    """PATH with git reachable and the *real* gh/glab not.
+
+    Prepending the fake directory is not enough to simulate a machine without a
+    CLI installed: `shutil.which` skips a non-executable entry and keeps looking,
+    so the real one further down PATH answers instead and the test passes for the
+    wrong reason.
+    """
+    dirs = ["/usr/bin", "/bin"]
+    git = shutil.which("git")
+    if git:
+        git_dir = os.path.dirname(git)
+        if git_dir not in dirs:
+            dirs.insert(0, git_dir)
+    return os.pathsep.join(dirs)
 
 
 class FakeCLI:
     """Installs fake executables on PATH for the duration of a test."""
 
-    def __init__(self, names: Sequence[str] = ("gh", "glab")):
+    def __init__(self, names: Sequence[str] = ("gh", "glab", "claude", "codex")):
         self.bin_dir = _bin_dir(names)
         self.dir = tempfile.mkdtemp(prefix="loop-fakecli-")
         self.log = os.path.join(self.dir, "calls.log")
@@ -72,7 +89,7 @@ class FakeCLI:
         self._render()
 
         self._saved = {k: os.environ.get(k) for k in ("PATH", "FAKE_CLI_LOG", "FAKE_CLI_ROUTES")}
-        os.environ["PATH"] = self.bin_dir + os.pathsep + (self._saved["PATH"] or "")
+        os.environ["PATH"] = self.bin_dir + os.pathsep + _minimal_path()
         os.environ["FAKE_CLI_LOG"] = self.log
         os.environ["FAKE_CLI_ROUTES"] = self.routes_file
 
@@ -95,16 +112,6 @@ class FakeCLI:
             }
         )
         self._render()
-        return self
-
-    def hide(self, *names: str) -> "FakeCLI":
-        """Make a CLI look uninstalled, for tests about a machine that lacks it."""
-        for name in names:
-            path = os.path.join(self.bin_dir, name)
-            if os.path.exists(path):
-                os.chmod(path, 0o600)
-                self._unhide = getattr(self, "_unhide", [])
-                self._unhide.append(path)
         return self
 
     def _render(self) -> None:
@@ -141,8 +148,6 @@ class FakeCLI:
         return None
 
     def cleanup(self) -> None:
-        for path in getattr(self, "_unhide", []):
-            os.chmod(path, 0o755)
         for key, value in self._saved.items():
             if value is None:
                 os.environ.pop(key, None)

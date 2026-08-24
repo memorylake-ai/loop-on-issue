@@ -171,13 +171,14 @@ def has_acceptance_criteria(text: str) -> bool:
     return any(_ACCEPTANCE_RE.search(s) for s in slots(text))
 
 
-def front_matter_for(kind: str, queue_label: str) -> str:
+def front_matter_for(kind: str, queue_label: str, forge: str = "github") -> str:
     """GitHub's template chooser metadata, prepended when scaffolding there.
 
-    GitLab has no equivalent and renders this as text, so it is added at the
-    scaffold step for GitHub only rather than living in the bundled file.
+    GitLab has no equivalent and renders this as literal text at the top of every
+    issue, so it is added at the scaffold step for GitHub only rather than living
+    in the bundled file.
     """
-    if kind != "issue":
+    if kind != "issue" or forge != "github":
         return ""
     return (
         "---\n"

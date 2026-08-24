@@ -7,6 +7,7 @@ Kept in its own module so tests can point the forge backends at a fake `gh` or
 from __future__ import annotations
 
 import subprocess
+from dataclasses import dataclass
 from typing import List, Optional
 
 
@@ -17,6 +18,38 @@ class CommandError(RuntimeError):
         super().__init__(message)
         self.returncode = returncode
         self.stderr = stderr
+
+
+@dataclass
+class Result:
+    returncode: int
+    stdout: str
+    stderr: str
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+
+def run_result(cmd: List[str], stdin: Optional[str] = None, cwd: Optional[str] = None) -> Result:
+    """Run a command and report how it went, without raising.
+
+    For probes where a non-zero exit is itself the answer — `gh auth status` on a
+    logged-out machine — and where running it twice to learn both the output and
+    the exit code would double a slow network call.
+    """
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            cwd=cwd,
+        )
+    except OSError as exc:
+        return Result(127, "", str(exc))
+    return Result(proc.returncode, proc.stdout or "", proc.stderr or "")
 
 
 def run(

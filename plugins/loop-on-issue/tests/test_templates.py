@@ -136,6 +136,11 @@ class FrontMatter(unittest.TestCase):
         self.assertTrue(fm.startswith("---\n"))
         self.assertIn("labels: loop", fm)
 
+    def test_gitlab_gets_no_metadata_even_for_issues(self):
+        # GitLab has no template chooser and renders this as literal text at the
+        # top of every issue.
+        self.assertEqual(tpl.front_matter_for("issue", "loop", "gitlab"), "")
+
     def test_pr_scaffold_gets_no_metadata(self):
         # GitHub reads no front matter on a pull request template, and GitLab
         # would render it as literal text at the top of every description.

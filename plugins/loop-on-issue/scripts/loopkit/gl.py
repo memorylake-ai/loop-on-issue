@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 from .errors import Precondition
 from .forge import Forge, did_you_mean, pick_cr, title_claims_issue
 from .models import ChangeRequest, Comment, Issue, Repo, ReviewThread
-from .proc import CommandError, run
+from .proc import CommandError, run, run_result
 
 
 class GitLab(Forge):
@@ -192,12 +192,9 @@ class GitLab(Forge):
         cmd = ["glab", "auth", "status"]
         if self.repo.host and self.repo.host != "gitlab.com":
             cmd += ["--hostname", self.repo.host]
-        try:
-            out = run(cmd, check=False)
-            run(cmd)
-        except CommandError as exc:
-            return False, (exc.stderr or str(exc)).strip()
-        return True, out.strip()
+        result = run_result(cmd)
+        detail = (result.stdout + "\n" + result.stderr).strip()
+        return result.ok, detail
 
     def permissions(self):
         try:
