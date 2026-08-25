@@ -606,3 +606,73 @@ class SelfServiceAllowList(Base):
     def test_a_machine_with_no_writable_config_says_so(self):
         self.brain.allow_conversation = None
         self.assertIn("加不了", self._say("/allow"))
+
+
+class ApprovingWithoutRetypingTheId(Base):
+    """Quote the card, say 同意. Retyping R20260825-02 is the machine's job.
+
+    The id exists so several requests can be told apart. When there is only one
+    thing it could mean, demanding it is asking somebody to prove they read a
+    message they are visibly replying to.
+    """
+
+    def _pending(self, text="做个东西", mid="a"):
+        self.brain.handle(msg(text=text, msg_id=mid, sender="somebody"))
+        return self.store.by_status(intake_mod.PENDING)[-1]
+
+    def test_a_bare_approval_takes_the_only_pending_one(self):
+        request = self._pending()
+        reply = self.brain.handle(msg(text="同意", msg_id="m2", sender=self.APPROVER))
+        self.assertEqual(self.store.get(request.id).status, intake_mod.APPROVED)
+        self.assertIn(request.id, reply)
+
+    def test_a_bare_approval_still_takes_a_repository_and_a_note(self):
+        request = self._pending()
+        self.brain.handle(msg(text="同意 bloom 注意别动定价页", msg_id="m2", sender=self.APPROVER))
+        found = self.store.get(request.id)
+        self.assertEqual(found.repo, "org/bloom")
+        self.assertIn("定价页", found.approval_note)
+
+    def test_with_several_pending_it_asks_which(self):
+        # Guessing here approves the wrong piece of work, silently.
+        first = self._pending("第一件", mid="a")
+        second = self._pending("第二件", mid="b")
+        reply = self.brain.handle(msg(text="同意", msg_id="m2", sender=self.APPROVER))
+        self.assertIn(first.id, reply)
+        self.assertIn(second.id, reply)
+        self.assertEqual(self.store.get(first.id).status, intake_mod.PENDING)
+        self.assertEqual(self.store.get(second.id).status, intake_mod.PENDING)
+
+    def test_with_nothing_pending_it_says_so(self):
+        self.assertIn("没有", self.brain.handle(msg(text="同意", sender=self.APPROVER)))
+
+    def test_an_explicit_id_still_wins(self):
+        first = self._pending("第一件", mid="a")
+        self._pending("第二件", mid="b")
+        self.brain.handle(msg(text="同意 " + first.id, msg_id="m2", sender=self.APPROVER))
+        self.assertEqual(self.store.get(first.id).status, intake_mod.APPROVED)
+
+    def test_a_bare_rejection_needs_its_reason(self):
+        # The person who asked only ever sees this sentence.
+        request = self._pending()
+        reply = self.brain.handle(msg(text="拒绝", msg_id="m2", sender=self.APPROVER))
+        self.assertIn(request.id, reply)
+        self.assertIn("理由", reply)
+        self.assertEqual(self.store.get(request.id).status, intake_mod.PENDING)
+
+    def test_a_bare_rejection_with_a_reason_works(self):
+        request = self._pending()
+        self.brain.handle(msg(text="拒绝 这个已经做过了", msg_id="m2", sender=self.APPROVER))
+        self.assertEqual(self.store.get(request.id).status, intake_mod.REJECTED)
+
+    def test_cancel_takes_the_only_job_in_flight(self):
+        request = self._pending()
+        self.brain.handle(msg(text="同意 " + request.id, msg_id="ok", sender=self.APPROVER))
+        self.brain.cancel_job = lambda rid, by: (True, "已停掉 " + rid)
+        self.assertIn(request.id, self.brain.handle(
+            msg(text="/cancel", msg_id="m3", sender=self.APPROVER)))
+
+    def test_repo_takes_the_only_one_too(self):
+        request = self._pending()
+        self.brain.handle(msg(text="/repo bloom", msg_id="m2", sender=self.APPROVER))
+        self.assertEqual(self.store.get(request.id).repo, "org/bloom")

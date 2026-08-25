@@ -252,8 +252,9 @@ HELP = md(
     ),
     "**仅审批人**",
     bullets(
-        "`同意 <R-ID> [仓库] [备注]` — 批准，也可写 `/approve`",
-        "`拒绝 <R-ID> <理由>` — 驳回，也可写 `/reject`",
+        "`同意 [仓库] [备注]` — 批准（只有一条在等时可省 ID），也可写 `/approve`",
+        "`拒绝 <理由>` — 驳回，也可写 `/reject`",
+        "有多条在等时写全：`同意 <R-ID>` / `拒绝 <R-ID> <理由>`",
         "`/repo <R-ID> <仓库>` — 改归哪个仓库（开跑前有效）",
         "`/cancel <R-ID>` — 停掉卡住的任务，释放 worker",
         "`/dev <issue-id> [仓库]` — 让 agent 现在就去开发这个 issue",
@@ -444,9 +445,8 @@ class Brain:
         # anyone being asked. One round trip buys a look at how the text was
         # understood and where it is about to land.
         choices = bullets(*[
-            "`同意 {} {}` → `{}`{}".format(
-                request.id, e.name, e.repo,
-                "  ← 默认" if entry and e.name == entry.name else "")
+            "`同意 {}` → `{}`{}".format(
+                e.name, e.repo, "  ← 默认" if entry and e.name == entry.name else "")
             for e in self.registry.all()
         ])
         if mine:
@@ -455,8 +455,8 @@ class Brain:
                 "> {}".format(request.text.replace("\n", "\n> ")),
                 bullets(
                     "拟归入：`{}`（`{}`）{}".format(entry.repo, entry.name, consumed_note),
-                    "确认：`同意 {}`".format(request.id),
-                    "不要了：`拒绝 {} <理由>`".format(request.id),
+                    "确认：**`同意`**（只有这一条在等时不用打 ID）",
+                    "不要了：**`拒绝 <理由>`**",
                 ),
                 "换仓库：" if len(self.registry.all()) > 1 else "",
                 choices if len(self.registry.all()) > 1 else "",
@@ -466,9 +466,10 @@ class Brain:
             "> {}".format(request.text.replace("\n", "\n> ")),
             bullets(
                 "拟归入：`{}`（`{}`）{}".format(entry.repo, entry.name, consumed_note),
-                "批准：`同意 {}`".format(request.id),
-                "改仓库后批准：`同意 {} <仓库>`".format(request.id),
-                "驳回：`拒绝 {} <理由>`".format(request.id),
+                "批准：**`同意`**（只有这一条在等时不用打 ID）",
+                "改仓库后批准：**`同意 <仓库>`**",
+                "驳回：**`拒绝 <理由>`**",
+                "有多条在等时才需要写全：`同意 {}`".format(request.id),
             ),
         )
 
@@ -652,10 +653,10 @@ class Brain:
 
     def _cmd_repo(self, rest, inbound):
         """Point a request at a different repository, before it starts."""
-        request_id, remainder = _split_id(rest)
-        request = self.store.get(request_id) if request_id else None
-        if not request:
-            return "用法：`/repo <R-ID> <仓库名字>`，例如 `/repo R20260824-01 demo-gl`"
+        request, remainder, problem = self._target(
+            rest, (intake_mod.PENDING, intake_mod.APPROVED), "/repo")
+        if problem:
+            return problem
         entry = self.registry.get((remainder or "").strip().split(" ")[0])
         if not entry:
             return md(
@@ -709,7 +710,9 @@ class Brain:
                     "直接发一句话就是提新需求",
                 ),
             )
-        blocks.append("`/r <R-ID>` 看某一条 · 批准：`同意 <R-ID>` · 驳回：`拒绝 <R-ID> <理由>`")
+        blocks.append("`/r <R-ID>` 看某一条 · 批准：`同意 <R-ID>` · 驳回：`拒绝 <R-ID> <理由>`"
+                      if total > 1 else
+                      "`/r <R-ID>` 看某一条 · 批准：`同意` · 驳回：`拒绝 <理由>`")
         return md(*blocks)
 
     def _cmd_r(self, rest, inbound):
@@ -758,12 +761,9 @@ class Brain:
         )
 
     def _cmd_approve(self, rest, inbound):
-        request_id, remainder = _split_id(rest)
-        if not request_id:
-            return "用法：`同意 <R-ID> [仓库] [备注]`，例如 `同意 R20260824-01`"
-        request = self.store.get(request_id)
-        if not request:
-            return "找不到 `{}`。用 `/p` 看待审批的。".format(request_id)
+        request, remainder, problem = self._target(rest, (intake_mod.PENDING,), "同意")
+        if problem:
+            return problem
         repo, note = self._split_repo(remainder)
         try:
             request.approve(by=inbound.sender_nick or self.approver_nick, note=note, repo=repo)
@@ -782,14 +782,12 @@ class Brain:
         )
 
     def _cmd_reject(self, rest, inbound):
-        request_id, reason = _split_id(rest)
-        if not request_id:
-            return "用法：`拒绝 <R-ID> <理由>`，例如 `拒绝 R20260824-01 已经做过了`"
-        request = self.store.get(request_id)
-        if not request:
-            return "找不到 `{}`。".format(request_id)
+        request, reason, problem = self._target(rest, (intake_mod.PENDING,), "拒绝")
+        if problem:
+            return problem
         if len(reason.strip()) < 3:
-            return "驳回要写理由——提需求的人只会看到这句话。"
+            return "驳回 **{}** 要写理由——提需求的人只会看到这句话。\n\n`拒绝 {} <理由>`".format(
+                request.id, request.id)
         try:
             request.reject(by=inbound.sender_nick or self.approver_nick, reason=reason.strip())
         except intake_mod.NotPending as exc:
@@ -799,10 +797,9 @@ class Brain:
 
     def _cmd_cancel(self, rest, inbound):
         """Stop a job that is not going anywhere, and free the slot it holds."""
-        request_id, _ = _split_id(rest)
-        request = self.store.get(request_id) if request_id else None
-        if not request:
-            return md("用法：`/cancel <R-ID>`，例如 `/cancel R20260824-01`", "`/p` 看在办的。")
+        request, _, problem = self._target(rest, intake_mod.OPEN, "/cancel")
+        if problem:
+            return problem
         if self.cancel_job is None:
             if request.status not in intake_mod.OPEN:
                 return "**{}** 已经是 {}。".format(request.id, request.status)
@@ -844,6 +841,70 @@ class Brain:
         self.store.save(request)
         self.enqueue(request)
         return "🚀 **{}** 已排入队列：在 `{}` 开发 #{}。".format(request.id, entry.repo, number)
+
+    def _target(self, rest, statuses, verb):
+        """Which request a command without an explicit id means.
+
+        The id exists so several requests can be told apart. When only one thing
+        it could mean is in flight, demanding it asks somebody to prove they read
+        the message they are visibly replying to. When several are, guessing
+        approves the wrong piece of work — silently — so it asks instead.
+
+        Returns `(request, remainder, problem)`.
+        """
+        request_id, remainder = _split_id(rest)
+        if request_id and _REQUEST_ID_RE.match(request_id):
+            request = self.store.get(request_id)
+            if not request:
+                return None, "", md(
+                    "找不到需求 `{}`。".format(request_id),
+                    bullets("需求 ID 形如 `R20260825-02`", "`/p` 看在办的"),
+                )
+            return request, remainder, None
+
+        # Nothing that looks like an id, so the whole line is arguments.
+        candidates = self.store.by_status(*statuses)
+        if not candidates:
+            return None, "", "现在没有可以{}的需求。`/p` 看在办的。".format(verb)
+        if len(candidates) > 1:
+            return None, "", md(
+                "有 {} 条在办，说清楚是哪条：".format(len(candidates)),
+                bullets(*["`{} {}` — {}".format(verb, r.id, _one_line(r.text, 50))
+                          for r in candidates]),
+            )
+        return candidates[0], (rest or "").strip(), None
+
+    def _target(self, rest, statuses, verb):
+        """Which request a command without an explicit id means.
+
+        The id exists so several requests can be told apart. When only one thing
+        it could mean is in flight, demanding it asks somebody to prove they read
+        the message they are visibly replying to. When several are, guessing
+        approves the wrong piece of work — silently — so it asks instead.
+
+        Returns `(request, remainder, problem)`.
+        """
+        request_id, remainder = _split_id(rest)
+        if request_id and _REQUEST_ID_RE.match(request_id):
+            request = self.store.get(request_id)
+            if not request:
+                return None, "", md(
+                    "找不到需求 `{}`。".format(request_id),
+                    bullets("需求 ID 形如 `R20260825-02`", "`/p` 看在办的"),
+                )
+            return request, remainder, None
+
+        # Nothing that looks like an id, so the whole line is arguments.
+        candidates = self.store.by_status(*statuses)
+        if not candidates:
+            return None, "", "现在没有可以{}的需求。`/p` 看在办的。".format(verb)
+        if len(candidates) > 1:
+            return None, "", md(
+                "有 {} 条在办，说清楚是哪条：".format(len(candidates)),
+                bullets(*["`{} {}` — {}".format(verb, r.id, _one_line(r.text, 50))
+                          for r in candidates]),
+            )
+        return candidates[0], (rest or "").strip(), None
 
     def _split_repo(self, text: str):
         """Pull a leading repository name out of the rest of an approval.
