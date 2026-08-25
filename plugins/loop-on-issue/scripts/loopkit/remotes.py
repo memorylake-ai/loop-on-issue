@@ -139,6 +139,23 @@ def remote_url(name: str, cwd: Optional[str] = None) -> Optional[str]:
         return None
 
 
+def default_base_ref(cwd: Optional[str] = None) -> Optional[str]:
+    """The remote's default branch as an `origin/<branch>` ref, or `None`.
+
+    `git clone` records the remote's default under `refs/remotes/origin/HEAD`, so
+    reading it needs no network. A repository made by `git init` and never fetched
+    has nothing to read — this returns `None`, and the caller keeps its configured
+    default rather than guessing `main` at a repo whose default is `master`.
+    """
+    try:
+        ref = run(
+            ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=cwd
+        ).strip()
+    except CommandError:
+        return None
+    return ref or None
+
+
 def _probe_cli(cwd: Optional[str]) -> Optional[Repo]:
     """Ask the installed CLIs which project this directory is.
 

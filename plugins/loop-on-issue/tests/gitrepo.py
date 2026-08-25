@@ -16,7 +16,16 @@ def _git(cwd, *args):
 
 
 def make(remote_url="git@github.com:acme/widget.git", commit=True):
-    root = tempfile.mkdtemp(prefix="loop-repo-")
+    return make_at(tempfile.mkdtemp(prefix="loop-repo-"), remote_url=remote_url, commit=commit)
+
+
+def make_at(root, remote_url="git@github.com:acme/widget.git", commit=True):
+    """Initialise a git repo at an existing (or to-be-created) path.
+
+    For tests that need several repos side by side under one container directory,
+    which is what workspace discovery walks.
+    """
+    os.makedirs(root, exist_ok=True)
     _git(root, "init", "-q")
     _git(root, "config", "user.name", "Test User")
     _git(root, "config", "user.email", "test@example.com")

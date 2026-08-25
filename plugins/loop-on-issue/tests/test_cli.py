@@ -1,7 +1,10 @@
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
@@ -12,6 +15,7 @@ from fakecli import FakeCLI
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 import loop_cli  # noqa: E402
+from loopkit import repos as repos_mod  # noqa: E402
 
 
 class CLITest(unittest.TestCase):
@@ -345,6 +349,87 @@ class Setup(CLITest):
         code, _, _ = self.run_cli("init", "--yes")
         self.assertEqual(code, 0)
         self.assertTrue(os.path.isfile(os.path.join(self.root, ".loop-on-issue", "config.json")))
+
+    def test_init_writes_assignee_and_verify_command_from_flags(self):
+        # The values init cannot guess, set in one call so the batch flow does not
+        # have to hand-edit config.json afterward.
+        self.cli.route("api", "/labels", stdout=[{"name": "loop"}])
+        self.run_cli("init", "--yes", "--assignee", "muxuan",
+                     "--verify-command", "./cicd/check-all-locally.sh")
+        with open(os.path.join(self.root, ".loop-on-issue", "config.json")) as fh:
+            written = json.load(fh)
+        self.assertEqual(written["assignee"], "muxuan")
+        self.assertEqual(written["verify_command"], "./cicd/check-all-locally.sh")
+
+    def test_init_sets_the_base_branch_from_a_flag(self):
+        self.cli.route("api", "/labels", stdout=[{"name": "loop"}])
+        self.run_cli("init", "--yes", "--base-branch", "origin/release")
+        with open(os.path.join(self.root, ".loop-on-issue", "config.json")) as fh:
+            written = json.load(fh)
+        self.assertEqual(written["base_branch"], "origin/release")
+
+    def _point_origin_head_at(self, branch):
+        subprocess.run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD",
+             "refs/remotes/origin/" + branch],
+            cwd=self.root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+    def test_init_detects_the_remote_default_branch_for_base(self):
+        # A repo whose default branch is master must not have its base wired to a
+        # nonexistent origin/main — that is exactly what stops worktrees starting.
+        self.cli.route("api", "/labels", stdout=[{"name": "loop"}])
+        self._point_origin_head_at("master")
+        self.run_cli("init", "--yes")
+        with open(os.path.join(self.root, ".loop-on-issue", "config.json")) as fh:
+            written = json.load(fh)
+        self.assertEqual(written["base_branch"], "origin/master")
+
+    def test_an_explicit_base_branch_beats_detection(self):
+        self.cli.route("api", "/labels", stdout=[{"name": "loop"}])
+        self._point_origin_head_at("master")
+        self.run_cli("init", "--yes", "--base-branch", "origin/develop")
+        with open(os.path.join(self.root, ".loop-on-issue", "config.json")) as fh:
+            written = json.load(fh)
+        self.assertEqual(written["base_branch"], "origin/develop")
+
+    def _use_temp_registry(self):
+        reg_dir = tempfile.mkdtemp(prefix="loop-reg-")
+        self.addCleanup(shutil.rmtree, reg_dir, True)
+        path = os.path.join(reg_dir, "repos.json")
+        previous = os.environ.get("LOOP_REPOS")
+        os.environ["LOOP_REPOS"] = path
+
+        def restore():
+            if previous is None:
+                os.environ.pop("LOOP_REPOS", None)
+            else:
+                os.environ["LOOP_REPOS"] = previous
+        self.addCleanup(restore)
+        return path
+
+    def test_init_register_records_the_repo_in_the_machine_registry(self):
+        reg_path = self._use_temp_registry()
+        self.cli.route("api", "/labels", stdout=[{"name": "loop"}])
+        self.run_cli("init", "--yes", "--register")
+        reg = repos_mod.Registry.load(reg_path)
+        self.assertEqual([e.repo for e in reg.all()], ["acme/widget"])
+        self.assertEqual(os.path.realpath(reg.all()[0].path), os.path.realpath(self.root))
+        self.assertIsNotNone(reg.get("widget"))
+
+    def test_repos_discover_lists_repos_under_a_container(self):
+        self._use_temp_registry()
+        container = tempfile.mkdtemp(prefix="loop-ws-")
+        self.addCleanup(shutil.rmtree, container, True)
+        gitrepo.make_at(os.path.join(container, "widget"), "git@github.com:acme/widget.git")
+        gitrepo.make_at(os.path.join(container, "proj"), "git@gitlab.example.com:grp/proj.git")
+        os.makedirs(os.path.join(container, "notes"))
+        code, stdout, _ = self.run_cli("repos", "discover", container, "--json")
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout)
+        by_name = {r["name"]: r for r in payload["repos"]}
+        self.assertEqual(set(by_name), {"widget", "proj"})
+        self.assertEqual(by_name["widget"]["forge"], "github")
 
     def test_template_show_reports_which_layer_won(self):
         code, stdout, stderr = self.run_cli("template", "show", "issue")

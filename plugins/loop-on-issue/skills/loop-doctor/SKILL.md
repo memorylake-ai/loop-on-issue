@@ -82,6 +82,9 @@ branch from this ref, so nothing can start until it exists.
 "$LOOP" init --yes                # apply it
 "$LOOP" init --yes --lang zh      # Chinese template set
 "$LOOP" init --yes --force        # overwrite templates that already exist
+"$LOOP" init --yes \
+    --assignee muxuan --verify-command './cicd/check-all-locally.sh'   # fill the un-guessables in one call
+"$LOOP" init --yes --register     # also record it in the machine-level bot registry
 ```
 
 Show the human the plan before applying it. It touches their repository — files
@@ -105,6 +108,11 @@ leaving them at `null`:
   nothing. Find it in `CONTRIBUTING.md`, `package.json`, `Makefile`, or CI config
   and propose it rather than asking an open question.
 
+Pass both straight to `init` (`--assignee`, `--verify-command`) so nothing has to
+hand-edit `config.json` afterward. `init` also detects the remote's default branch
+and wires `base_branch` to it, so a `master` repo is not left pointing at a
+nonexistent `origin/main`; pass `--base-branch` only to override that.
+
 ### Two boundaries init does not cross
 
 **It creates exactly one label: the queue label.** Every other unknown label stays
@@ -115,6 +123,38 @@ reason the create path validates labels, and init's convenience must not dilute
 it. If a label is missing, a human creates it deliberately.
 
 **It never runs `auth login`.** Print the command; let them run it.
+
+### Setting up a whole workspace at once
+
+When `doctor` fails `git.repo` because the directory is a *container* of several
+repositories rather than one — or the human just wants to set up more than one at
+once — do not make them `cd` and `init` repo by repo. Ask the CLI what is there:
+
+```bash
+"$LOOP" repos discover <workspace dir> --json
+```
+
+It walks the immediate children (not recursively — a submodule superproject is one
+repo, not a dozen), and for each reports its `forge`, project `repo` path, whether
+it is already `registered` or already carries a `.loop-on-issue`, the remote's
+`default_branch`, and `verify_candidates` scanned from that repo's own build files.
+
+Present the repositories as a **multi-select** (the ones already carrying
+`has_config` are set up already — default them unchecked), and for each one the
+human picks:
+
+```bash
+"$LOOP" init -C <repo path> --yes --register \
+    --assignee <the gh/glab-authenticated user for that repo's forge> \
+    --verify-command <one of that repo's verify_candidates — let them confirm>
+```
+
+`verify_candidates` are surfaced, never chosen: which one is the right gate is a
+judgement — `check-all` over `test-all`, say — so confirm each rather than taking
+the first. `--register` records the repo in the machine-level bot registry in the
+same call, and `init` wires each repo's own default branch, so a `master` repo is
+correct without asking. If more than one repo ends up registered and none is the
+default, set it once at the end: `"$LOOP" repos default <name>`.
 
 ## Templates
 

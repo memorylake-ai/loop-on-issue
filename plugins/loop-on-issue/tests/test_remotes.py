@@ -1,7 +1,9 @@
+import subprocess
 import unittest
 
 import _bootstrap  # noqa: F401
 
+import gitrepo
 from loopkit import remotes
 
 
@@ -101,6 +103,29 @@ class RemoteOrder(unittest.TestCase):
             remotes.remote_order(["origin", "upstream"], prefer="nope"),
             ["upstream", "origin"],
         )
+
+
+class DefaultBaseRef(unittest.TestCase):
+    def setUp(self):
+        self.root = gitrepo.make()
+        self.addCleanup(gitrepo.destroy, self.root)
+
+    def _point_origin_head_at(self, branch):
+        subprocess.run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD",
+             "refs/remotes/origin/" + branch],
+            cwd=self.root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+    def test_reads_the_remotes_default_branch(self):
+        # `git clone` records the remote's default under refs/remotes/origin/HEAD.
+        self._point_origin_head_at("master")
+        self.assertEqual(remotes.default_base_ref(self.root), "origin/master")
+
+    def test_none_when_no_remote_head_is_recorded(self):
+        # A repo made by `git init` and never fetched has nothing local to read,
+        # so the caller keeps its configured default rather than guessing.
+        self.assertIsNone(remotes.default_base_ref(self.root))
 
 
 if __name__ == "__main__":
