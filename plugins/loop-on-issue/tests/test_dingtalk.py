@@ -30,6 +30,26 @@ class EnvLoading(unittest.TestCase):
         path = self._write("a.env", "# a comment\n\nDINGTALK_CLIENT_ID=abc\n")
         self.assertEqual(dingtalk.load_env([path], environ={})["DINGTALK_CLIENT_ID"], "abc")
 
+    def test_strips_an_inline_comment_after_a_quoted_value(self):
+        # The bug: `KEY="v"   # note` kept the whole tail as the value, so a
+        # placeholder comment read as the credential and the bot looked
+        # configured when it was not.
+        path = self._write("a.env", 'DINGTALK_ROBOT_CODE="dingabc"   # usually the client id\n')
+        self.assertEqual(dingtalk.load_env([path], environ={})["DINGTALK_ROBOT_CODE"], "dingabc")
+
+    def test_strips_an_inline_comment_after_an_unquoted_value(self):
+        path = self._write("a.env", "DINGTALK_CLIENT_ID=dingabc   # the app key\n")
+        self.assertEqual(dingtalk.load_env([path], environ={})["DINGTALK_CLIENT_ID"], "dingabc")
+
+    def test_keeps_a_hash_that_is_inside_quotes(self):
+        path = self._write("a.env", 'DINGTALK_CLIENT_SECRET="a#b#c"\n')
+        self.assertEqual(dingtalk.load_env([path], environ={})["DINGTALK_CLIENT_SECRET"], "a#b#c")
+
+    def test_keeps_a_hash_with_no_leading_space_in_an_unquoted_value(self):
+        # A comment needs whitespace before the '#'; a bare '#' is part of the value.
+        path = self._write("a.env", "DINGTALK_CLIENT_ID=ab#cd\n")
+        self.assertEqual(dingtalk.load_env([path], environ={})["DINGTALK_CLIENT_ID"], "ab#cd")
+
     def test_tolerates_export_prefix(self):
         path = self._write("a.env", 'export DINGTALK_CLIENT_ID="abc"\n')
         self.assertEqual(dingtalk.load_env([path], environ={})["DINGTALK_CLIENT_ID"], "abc")
