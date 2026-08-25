@@ -65,6 +65,7 @@ _ALIASES = {
     "repos": "repos", "repo": "repo",
     "dev": "dev", "go": "dev", "start": "dev",
     "cancel": "cancel", "stop": "cancel", "kill": "cancel",
+    "talk": "talk", "more": "talk", "continue": "talk", "再": "talk",
     "allow": "allow", "enable-here": "allow",
     "deny": "deny", "disable-here": "deny",
     "approve": "approve", "ok": "approve",
@@ -257,6 +258,7 @@ HELP = md(
         "有多条在等时写全：`同意 <R-ID>` / `拒绝 <R-ID> <理由>`",
         "`/repo <R-ID> <仓库>` — 改归哪个仓库（开跑前有效）",
         "`/cancel <R-ID>` — 停掉卡住的任务，释放 worker",
+        "`/talk [R-ID] <想说的话>` — 接着那次的上下文继续聊（提需求的人也能用）",
         "`/dev <issue-id> [仓库]` — 让 agent 现在就去开发这个 issue",
     ),
     "**看板维护**",
@@ -794,6 +796,62 @@ class Brain:
             return "{}".format(exc).replace("is already", "已经是")
         self.store.save(request)
         return "🚫 **{}** 已驳回：{}".format(request.id, reason.strip())
+
+    def _cmd_talk(self, rest, inbound):
+        """Keep talking to the session that did the work.
+
+        Its context is the expensive part — the recon it did, the drafts it
+        considered, why it cut the slices where it did. Starting fresh throws all
+        of that away to answer "split the second one further".
+
+        Open to the approver and to whoever raised the requirement: it is their
+        requirement, and the session is already scoped to it.
+        """
+        request_id, message = _split_id(rest)
+        if request_id and _REQUEST_ID_RE.match(request_id):
+            request = self.store.get(request_id)
+            if not request:
+                return "找不到需求 `{}`。".format(request_id)
+        else:
+            request, message = self.store.latest_continuable(), (rest or "").strip()
+            if request is None:
+                # "Nothing to talk to" while a job is visibly mid-flight sends
+                # somebody looking for a lost record. Say which, and that it is
+                # busy rather than missing.
+                busy = self.store.by_status(intake_mod.RUNNING)
+                if busy:
+                    return md(
+                        "**{}** 还在跑，等它结束再接着聊。".format(busy[0].id),
+                        "> {}".format(_one_line(busy[0].text, 60)),
+                    )
+                return md("没有已经跑完、可以接着聊的任务。",
+                          bullets("`/p` 看在办的", "`/r <R-ID>` 看某一条"))
+
+        if not message:
+            return md(
+                "用法：`/talk <想说的话>`",
+                "会接着 **{}** 那次的上下文往下聊：".format(request.id),
+                "> {}".format(_one_line(request.text, 60)),
+            )
+        allowed = (inbound.sender_id == self.approver
+                   or (request.requester_id and inbound.sender_id == request.requester_id))
+        if self.approver and not allowed:
+            return "只有 **{}** 或提出这条需求的人能接着聊。".format(self.approver_nick)
+        if not request.can_continue:
+            return "**{}** 现在是 {}，{}".format(
+                request.id, request.status,
+                "还在跑，等它结束再说。" if request.status == intake_mod.RUNNING
+                else "没有可以恢复的会话。")
+
+        request.follow_up(message)
+        self.store.save(request)
+        self.enqueue(request)
+        return md(
+            "💬 接着 **{}** 聊，已排队。".format(request.id),
+            "> {}".format(message),
+            bullets("它带着上次的全部上下文：调研、草稿、为什么那样切",
+                    "结果会发回这里"),
+        )
 
     def _cmd_cancel(self, rest, inbound):
         """Stop a job that is not going anywhere, and free the slot it holds."""

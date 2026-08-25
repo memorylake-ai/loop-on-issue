@@ -250,7 +250,12 @@ class Executor:
         log.info("running %s (%s) in %s session=%s",
                  request.id, request.kind, entry.path, session)
 
-        prompt = (self._retry_prompt(request) if resuming else self._prompt(request, entry))
+        followup = request.take_followup()
+        if followup:
+            self.store.save(request)
+        prompt = (self._followup_prompt(request, followup) if followup
+                  else self._retry_prompt(request) if resuming
+                  else self._prompt(request, entry))
         log_path = self.store.log_for(request.id)
         repo_conf = cfg.load(entry.path)
 
@@ -388,6 +393,23 @@ class Executor:
         started = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(request.started_at - 60))
         return [i.url for i in issues if (i.created_at or "") >= started]
 
+    def _followup_prompt(self, request, message):
+        """Continue the conversation, not restate the brief.
+
+        The session already holds the requirement, whatever it read and whatever
+        it built. Repeating any of that invites it to start again and reach a
+        different answer than the one being asked about.
+        """
+        return (
+            "The person who asked for this has something to add:\n\n{message}\n\n"
+            "Act on it in the same repository, using what you already know. If it "
+            "means changing issues you filed, change them — edit or close what is "
+            "wrong rather than filing more alongside it.\n\n"
+            "Then write what you did to `{result}`, replacing what is there. That "
+            "file is what gets sent back, so it should read as an answer to what "
+            "they just said, not a summary of everything so far."
+        ).format(message=message.strip(), result=self.store.result_for(request.id))
+
     def _retry_prompt(self, request):
         """Continue an attempt that did not finish, rather than starting over.
 
@@ -461,6 +483,7 @@ class Executor:
             parts.append(listener_mod.bullets(*request.issues))
         if result.strip():
             parts.append(result.strip()[:1500])
+        parts.append("想改点什么就接着说：`/talk <想说的话>`")
         return listener_mod.md(*parts)
 
     def _failure_text(self, request):

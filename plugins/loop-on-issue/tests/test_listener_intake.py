@@ -676,3 +676,71 @@ class ApprovingWithoutRetypingTheId(Base):
         request = self._pending()
         self.brain.handle(msg(text="/repo bloom", msg_id="m2", sender=self.APPROVER))
         self.assertEqual(self.store.get(request.id).repo, "org/bloom")
+
+
+class ContinuingTheConversation(Base):
+    """The session that did the work is the expensive thing; keep talking to it."""
+
+    def _finished(self, requester="somebody", requester_id="staff-9"):
+        self.brain.handle(listener.Inbound(
+            msg_id="a", text="做个东西", sender_id=requester_id, sender_nick=requester,
+            conversation_id="cid-1"))
+        request = self.store.all()[-1]
+        self.brain.handle(msg(text="同意 " + request.id, msg_id="ok", sender=self.APPROVER))
+        request = self.store.get(request.id)
+        request.start(session="derived")
+        request.finish(issues=["https://f/1"])
+        return self.store.save(request)
+
+    def test_it_resumes_the_session_that_did_the_work(self):
+        request = self._finished()
+        reply = self.brain.handle(msg(text="/talk 把第二条再拆细一点", msg_id="m2",
+                                      sender=self.APPROVER))
+        found = self.store.get(request.id)
+        self.assertEqual(found.followup, "把第二条再拆细一点")
+        self.assertEqual(found.session, "derived")
+        self.assertEqual(self.enqueued[-1].id, request.id)
+        self.assertIn(request.id, reply)
+
+    def test_the_person_who_raised_it_may_continue_too(self):
+        # It is their requirement, and the session is already scoped to it.
+        request = self._finished()
+        self.brain.handle(listener.Inbound(
+            msg_id="m3", text="/talk 再拆细", sender_id="staff-9", sender_nick="somebody",
+            conversation_id="cid-1"))
+        self.assertEqual(self.store.get(request.id).followup, "再拆细")
+
+    def test_a_stranger_may_not(self):
+        request = self._finished()
+        reply = self.brain.handle(listener.Inbound(
+            msg_id="m3", text="/talk 再拆细", sender_id="nobody", sender_nick="路人",
+            conversation_id="cid-1"))
+        self.assertIn("只有", reply)
+        self.assertEqual(self.store.get(request.id).followup, "")
+
+    def test_it_takes_the_most_recent_when_none_is_named(self):
+        # Unlike approving, resuming to ask something destroys nothing — so this
+        # guesses where approval refuses to, and says which it took.
+        self._finished()
+        second = self._finished()
+        second.finished_at += 100
+        self.store.save(second)
+        reply = self.brain.handle(msg(text="/talk 再拆细", msg_id="m4", sender=self.APPROVER))
+        self.assertIn(second.id, reply)
+
+    def test_a_running_job_is_refused(self):
+        # A second prompt into the same session races the thought in progress.
+        request = self._finished()
+        request.status = intake_mod.RUNNING
+        self.store.save(request)
+        self.assertIn("还在跑", self.brain.handle(
+            msg(text="/talk 再拆细", msg_id="m5", sender=self.APPROVER)))
+
+    def test_a_message_is_required(self):
+        self._finished()
+        self.assertIn("用法", self.brain.handle(
+            msg(text="/talk", msg_id="m6", sender=self.APPROVER)))
+
+    def test_with_nothing_finished_it_says_so(self):
+        self.assertIn("没有已经跑完", self.brain.handle(
+            msg(text="/talk 再拆细", sender=self.APPROVER)))

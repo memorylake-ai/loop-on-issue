@@ -94,6 +94,10 @@ class Request:
     #: A decomposition has no issue to hold them, and it is the job that most
     #: needs to ask: most ambiguity, least to check a reading against.
     questions: List[Dict[str, Any]] = field(default_factory=list)
+    #: A message to hand the session on its next run. The agent that did the work
+    #: still holds the recon, the drafts and why it cut the slices where it did;
+    #: a follow-up resumes that rather than starting with none of it.
+    followup: str = ""
     session: str = ""
 
     # -- transitions ---------------------------------------------------------
@@ -157,6 +161,25 @@ class Request:
         self.error = "cancelled{}".format(" by " + by if by else "")
         self.pid = 0
         return self
+
+    @property
+    def can_continue(self) -> bool:
+        """Is there a session to resume, and is it free?
+
+        Not while running: a second prompt into the same session races the thought
+        already in progress.
+        """
+        return bool(self.session) and self.status in (DONE, FAILED, CANCELLED)
+
+    def follow_up(self, message: str) -> "Request":
+        self.followup = message
+        self.status = APPROVED
+        self.error = ""
+        return self
+
+    def take_followup(self) -> str:
+        message, self.followup = self.followup, ""
+        return message
 
     @property
     def running_for(self) -> float:
@@ -284,6 +307,16 @@ class Store:
     def by_status(self, *statuses: str) -> List[Request]:
         wanted = set(statuses)
         return [r for r in self.all() if r.status in wanted]
+
+    def latest_continuable(self) -> Optional[Request]:
+        """The most recently finished job.
+
+        "Continue the conversation" almost always means the last one, and unlike
+        approving, resuming a session to ask it something destroys nothing — so
+        this guesses where approval refuses to, and the reply names which it took.
+        """
+        done = [r for r in self.all() if r.can_continue]
+        return max(done, key=lambda r: (r.finished_at, r.id)) if done else None
 
     def due(self, now: Optional[float] = None) -> List[Request]:
         """Deferred jobs whose backoff has elapsed."""
