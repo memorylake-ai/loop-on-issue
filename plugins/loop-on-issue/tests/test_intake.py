@@ -483,3 +483,84 @@ class Deferring(unittest.TestCase):
         req.start(session="s")
         self.store.save(req)
         self.assertEqual(self.store.due(), [])
+
+
+class FollowUp(unittest.TestCase):
+    """A finished job still has its session; the conversation need not end.
+
+    The agent that decomposed a requirement holds the recon, the drafts and why it
+    cut the slices where it did. Asking it to split the second one further should
+    resume that, not start something with none of it.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="loop-intake-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.store = intake_mod.Store(self.dir)
+
+    def _done(self):
+        req = intake_mod.Request(id="R1", text="做个东西", repo="acme/widget")
+        req.approve(by="J", auto=True)
+        req.start(session="derived-uuid")
+        req.finish(issues=["https://f/1", "https://f/2"])
+        return self.store.save(req)
+
+    def test_a_finished_job_can_be_continued(self):
+        req = self._done()
+        self.assertTrue(req.can_continue)
+
+    def test_continuing_queues_it_again_with_the_message(self):
+        req = self._done()
+        req.follow_up("把第二条再拆细一点")
+        self.store.save(req)
+        found = self.store.get("R1")
+        self.assertEqual(found.status, intake_mod.APPROVED)
+        self.assertEqual(found.followup, "把第二条再拆细一点")
+
+    def test_it_keeps_the_session_so_the_context_survives(self):
+        req = self._done()
+        req.follow_up("再拆细")
+        self.assertEqual(req.session, "derived-uuid")
+
+    def test_a_failed_job_can_be_continued_too(self):
+        # Often the most useful case: it explains what blocked it, you answer.
+        req = intake_mod.Request(id="R2", text="x")
+        req.approve(by="J", auto=True)
+        req.start(session="s")
+        req.fail("blocked on something")
+        self.assertTrue(req.can_continue)
+
+    def test_a_job_that_never_ran_cannot_be(self):
+        # There is no session to resume into.
+        req = intake_mod.Request(id="R3", text="x")
+        self.assertFalse(req.can_continue)
+
+    def test_a_running_job_cannot_be(self):
+        # It is mid-thought; a second prompt into the same session would race it.
+        req = intake_mod.Request(id="R4", text="x")
+        req.approve(by="J", auto=True)
+        req.start(session="s")
+        self.assertFalse(req.can_continue)
+
+    def test_the_followup_is_cleared_once_taken(self):
+        req = self._done()
+        req.follow_up("再拆细")
+        taken = req.take_followup()
+        self.assertEqual(taken, "再拆细")
+        self.assertEqual(req.followup, "")
+
+    def test_taking_nothing_gives_nothing(self):
+        self.assertEqual(self._done().take_followup(), "")
+
+    def test_the_most_recently_finished_is_findable(self):
+        first = self._done()
+        second = intake_mod.Request(id="R9", text="later", repo="acme/widget")
+        second.approve(by="J", auto=True)
+        second.start(session="s2")
+        second.finish(issues=["https://f/9"])
+        second.finished_at = first.finished_at + 100
+        self.store.save(second)
+        self.assertEqual(self.store.latest_continuable().id, "R9")
+
+    def test_nothing_continuable_is_none(self):
+        self.assertIsNone(self.store.latest_continuable())

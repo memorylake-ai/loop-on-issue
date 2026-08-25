@@ -40,13 +40,17 @@ INTAKE = "intake"
 #: Approving a requirement and starting a session on an issue are the same class
 #: of act — both put an unattended agent to work — so they sit behind the same
 #: gate. Everything else, answering included, is open to the conversation.
-APPROVER_ONLY = ("approve", "reject", "dev", "repo", "cancel")
+APPROVER_ONLY = ("approve", "reject", "dev", "repo", "cancel", "allow", "deny")
 
 #: The one command an unlisted conversation may run. Without it the allow-list is
 #: a bootstrap deadlock: you cannot fill in a conversationId without first being
 #: told it, and you cannot be told it from a conversation that is ignored. It
 #: reveals only the caller's own identifiers, which they already have.
-ALLOWLIST_EXEMPT = ("whoami",)
+#: Runnable from a conversation that is not yet allow-listed. `whoami` because
+#: filling the list needs a value only an allow-listed conversation would tell
+#: you; `allow` because the whole point is to be used somewhere not yet listed —
+#: and it is gated on the approver instead.
+ALLOWLIST_EXEMPT = ("whoami", "allow")
 
 _ALIASES = {
     "h": "help", "help": "help", "?": "help",
@@ -61,6 +65,9 @@ _ALIASES = {
     "repos": "repos", "repo": "repo",
     "dev": "dev", "go": "dev", "start": "dev",
     "cancel": "cancel", "stop": "cancel", "kill": "cancel",
+    "talk": "talk", "more": "talk", "continue": "talk", "再": "talk",
+    "allow": "allow", "enable-here": "allow",
+    "deny": "deny", "disable-here": "deny",
     "approve": "approve", "ok": "approve",
     "reject": "reject",
     "report": "report",
@@ -97,6 +104,9 @@ class Inbound:
     conversation_id: str = ""
     pqk: Optional[str] = None
     session_webhook: str = ""
+    #: DingTalk's own answer to "group or private chat", which the ids do not
+    #: reveal. "1" is one-to-one, "2" is a group.
+    conversation_type: str = ""
 
 
 @dataclass
@@ -243,10 +253,12 @@ HELP = md(
     ),
     "**仅审批人**",
     bullets(
-        "`同意 <R-ID> [仓库] [备注]` — 批准，也可写 `/approve`",
-        "`拒绝 <R-ID> <理由>` — 驳回，也可写 `/reject`",
+        "`同意 [仓库] [备注]` — 批准（只有一条在等时可省 ID），也可写 `/approve`",
+        "`拒绝 <理由>` — 驳回，也可写 `/reject`",
+        "有多条在等时写全：`同意 <R-ID>` / `拒绝 <R-ID> <理由>`",
         "`/repo <R-ID> <仓库>` — 改归哪个仓库（开跑前有效）",
         "`/cancel <R-ID>` — 停掉卡住的任务，释放 worker",
+        "`/talk [R-ID] <想说的话>` — 接着那次的上下文继续聊（提需求的人也能用）",
         "`/dev <issue-id> [仓库]` — 让 agent 现在就去开发这个 issue",
     ),
     "**看板维护**",
@@ -259,6 +271,7 @@ HELP = md(
     bullets(
         "`/ping` — 存活",
         "`/whoami` — 看自己的 staffId 与会话 ID",
+        "`/allow` — 把当前群/私聊加进白名单（仅审批人）· `/deny` 移出",
         "`/h`（`/help`）— 本帮助",
     ),
 )
@@ -280,6 +293,8 @@ class Brain:
         assignee: Optional[str] = None,
         enqueue: Optional[Callable[[Any], None]] = None,
         cancel_job: Optional[Callable[[str, str], Any]] = None,
+        allow_conversation: Optional[Callable[[str, bool], Any]] = None,
+        deny_conversation: Optional[Callable[[str], Any]] = None,
         last_report: str = "",
     ):
         self.forge_for = forge_for
@@ -298,6 +313,9 @@ class Brain:
         # still mark the record, which is better than nothing but does not free
         # the worker.
         self.cancel_job = cancel_job
+        # Injected, so the Brain never decides where credentials live.
+        self.allow_conversation = allow_conversation
+        self.deny_conversation = deny_conversation
         self.last_report = last_report
 
     @property
@@ -429,9 +447,8 @@ class Brain:
         # anyone being asked. One round trip buys a look at how the text was
         # understood and where it is about to land.
         choices = bullets(*[
-            "`同意 {} {}` → `{}`{}".format(
-                request.id, e.name, e.repo,
-                "  ← 默认" if entry and e.name == entry.name else "")
+            "`同意 {}` → `{}`{}".format(
+                e.name, e.repo, "  ← 默认" if entry and e.name == entry.name else "")
             for e in self.registry.all()
         ])
         if mine:
@@ -440,8 +457,8 @@ class Brain:
                 "> {}".format(request.text.replace("\n", "\n> ")),
                 bullets(
                     "拟归入：`{}`（`{}`）{}".format(entry.repo, entry.name, consumed_note),
-                    "确认：`同意 {}`".format(request.id),
-                    "不要了：`拒绝 {} <理由>`".format(request.id),
+                    "确认：**`同意`**（只有这一条在等时不用打 ID）",
+                    "不要了：**`拒绝 <理由>`**",
                 ),
                 "换仓库：" if len(self.registry.all()) > 1 else "",
                 choices if len(self.registry.all()) > 1 else "",
@@ -451,9 +468,10 @@ class Brain:
             "> {}".format(request.text.replace("\n", "\n> ")),
             bullets(
                 "拟归入：`{}`（`{}`）{}".format(entry.repo, entry.name, consumed_note),
-                "批准：`同意 {}`".format(request.id),
-                "改仓库后批准：`同意 {} <仓库>`".format(request.id),
-                "驳回：`拒绝 {} <理由>`".format(request.id),
+                "批准：**`同意`**（只有这一条在等时不用打 ID）",
+                "改仓库后批准：**`同意 <仓库>`**",
+                "驳回：**`拒绝 <理由>`**",
+                "有多条在等时才需要写全：`同意 {}`".format(request.id),
             ),
         )
 
@@ -477,16 +495,65 @@ class Brain:
         Answered from any conversation on purpose — see ALLOWLIST_EXEMPT.
         """
         listed = inbound.conversation_id in self.conversations
+        private = inbound.conversation_type == "1"
+        lines = [
+            '`LOOP_DINGTALK_APPROVER="{}"`'.format(inbound.sender_id or "?"),
+            '`LOOP_DINGTALK_APPROVER_NICK="{}"`'.format(inbound.sender_nick or ""),
+            '`LOOP_DINGTALK_CONVERSATIONS="{}"`  ← 逗号分隔，追加而不是覆盖'.format(
+                inbound.conversation_id or "?"),
+        ]
+        if private:
+            # Group and private ids look alike, so which is which is stated. A card
+            # sent to the group endpoint with a private id is accepted and never
+            # delivered — nothing errors, it simply does not arrive.
+            lines.append('`LOOP_DINGTALK_DM_CONVERSATIONS="{}"`  ← 这是私聊，必须标出来'.format(
+                inbound.conversation_id))
         return md(
-            "你是 **{}**".format(inbound.sender_nick or "?"),
+            "你是 **{}**（{}）".format(inbound.sender_nick or "?", "私聊" if private else "群"),
             "**粘进 `~/.loop-on-issue/dingtalk.env`**",
-            bullets(
-                '`LOOP_DINGTALK_APPROVER="{}"`'.format(inbound.sender_id or "?"),
-                '`LOOP_DINGTALK_APPROVER_NICK="{}"`'.format(inbound.sender_nick or ""),
-                '`LOOP_DINGTALK_CONVERSATIONS="{}"`'.format(inbound.conversation_id or "?"),
-            ),
+            bullets(*lines),
             "本会话{}在白名单里。".format("已经" if listed else "**还不**"),
         )
+
+    def _cmd_allow(self, rest, inbound):
+        """Add the conversation this was sent from to the allow-list.
+
+        Exempt from the allow-list by necessity — it exists to be used somewhere
+        not yet listed — and gated on the approver instead, which is the same
+        person who decides what work runs.
+
+        Whether it is a group or a private chat comes from DingTalk rather than
+        from the id, which does not say: a card sent to the group endpoint with a
+        private id is accepted and never delivered, and nothing errors.
+        """
+        if self.allow_conversation is None:
+            return "这台机器上没有可写的配置，加不了。"
+        private = inbound.conversation_type == "1"
+        try:
+            self.allow_conversation(inbound.conversation_id, private)
+        except Exception as exc:  # noqa: BLE001
+            return "加不进去：{}".format(exc)
+        if inbound.conversation_id not in self.conversations:
+            self.conversations.append(inbound.conversation_id)
+        return md(
+            "✅ 本{}已加入白名单，立即生效。".format("私聊" if private else "群"),
+            bullets(
+                "`{}`".format(inbound.conversation_id),
+                "主动发的卡片（提问、运行报告）也会回到这里",
+                "移出：`/deny`",
+            ),
+        )
+
+    def _cmd_deny(self, rest, inbound):
+        if self.deny_conversation is None:
+            return "这台机器上没有可写的配置，改不了。"
+        try:
+            self.deny_conversation(inbound.conversation_id)
+        except Exception as exc:  # noqa: BLE001
+            return "移不出去：{}".format(exc)
+        if inbound.conversation_id in self.conversations:
+            self.conversations.remove(inbound.conversation_id)
+        return "本会话已移出白名单，之后这里的消息都会被忽略（`/allow` 可以加回来）。"
 
     def _cmd_ping(self, rest, inbound):
         return "alive · 待答 {} 条".format(len(self.index.all()))
@@ -588,10 +655,10 @@ class Brain:
 
     def _cmd_repo(self, rest, inbound):
         """Point a request at a different repository, before it starts."""
-        request_id, remainder = _split_id(rest)
-        request = self.store.get(request_id) if request_id else None
-        if not request:
-            return "用法：`/repo <R-ID> <仓库名字>`，例如 `/repo R20260824-01 demo-gl`"
+        request, remainder, problem = self._target(
+            rest, (intake_mod.PENDING, intake_mod.APPROVED), "/repo")
+        if problem:
+            return problem
         entry = self.registry.get((remainder or "").strip().split(" ")[0])
         if not entry:
             return md(
@@ -645,7 +712,9 @@ class Brain:
                     "直接发一句话就是提新需求",
                 ),
             )
-        blocks.append("`/r <R-ID>` 看某一条 · 批准：`同意 <R-ID>` · 驳回：`拒绝 <R-ID> <理由>`")
+        blocks.append("`/r <R-ID>` 看某一条 · 批准：`同意 <R-ID>` · 驳回：`拒绝 <R-ID> <理由>`"
+                      if total > 1 else
+                      "`/r <R-ID>` 看某一条 · 批准：`同意` · 驳回：`拒绝 <理由>`")
         return md(*blocks)
 
     def _cmd_r(self, rest, inbound):
@@ -694,12 +763,9 @@ class Brain:
         )
 
     def _cmd_approve(self, rest, inbound):
-        request_id, remainder = _split_id(rest)
-        if not request_id:
-            return "用法：`同意 <R-ID> [仓库] [备注]`，例如 `同意 R20260824-01`"
-        request = self.store.get(request_id)
-        if not request:
-            return "找不到 `{}`。用 `/p` 看待审批的。".format(request_id)
+        request, remainder, problem = self._target(rest, (intake_mod.PENDING,), "同意")
+        if problem:
+            return problem
         repo, note = self._split_repo(remainder)
         try:
             request.approve(by=inbound.sender_nick or self.approver_nick, note=note, repo=repo)
@@ -718,14 +784,12 @@ class Brain:
         )
 
     def _cmd_reject(self, rest, inbound):
-        request_id, reason = _split_id(rest)
-        if not request_id:
-            return "用法：`拒绝 <R-ID> <理由>`，例如 `拒绝 R20260824-01 已经做过了`"
-        request = self.store.get(request_id)
-        if not request:
-            return "找不到 `{}`。".format(request_id)
+        request, reason, problem = self._target(rest, (intake_mod.PENDING,), "拒绝")
+        if problem:
+            return problem
         if len(reason.strip()) < 3:
-            return "驳回要写理由——提需求的人只会看到这句话。"
+            return "驳回 **{}** 要写理由——提需求的人只会看到这句话。\n\n`拒绝 {} <理由>`".format(
+                request.id, request.id)
         try:
             request.reject(by=inbound.sender_nick or self.approver_nick, reason=reason.strip())
         except intake_mod.NotPending as exc:
@@ -733,12 +797,67 @@ class Brain:
         self.store.save(request)
         return "🚫 **{}** 已驳回：{}".format(request.id, reason.strip())
 
+    def _cmd_talk(self, rest, inbound):
+        """Keep talking to the session that did the work.
+
+        Its context is the expensive part — the recon it did, the drafts it
+        considered, why it cut the slices where it did. Starting fresh throws all
+        of that away to answer "split the second one further".
+
+        Open to the approver and to whoever raised the requirement: it is their
+        requirement, and the session is already scoped to it.
+        """
+        request_id, message = _split_id(rest)
+        if request_id and _REQUEST_ID_RE.match(request_id):
+            request = self.store.get(request_id)
+            if not request:
+                return "找不到需求 `{}`。".format(request_id)
+        else:
+            request, message = self.store.latest_continuable(), (rest or "").strip()
+            if request is None:
+                # "Nothing to talk to" while a job is visibly mid-flight sends
+                # somebody looking for a lost record. Say which, and that it is
+                # busy rather than missing.
+                busy = self.store.by_status(intake_mod.RUNNING)
+                if busy:
+                    return md(
+                        "**{}** 还在跑，等它结束再接着聊。".format(busy[0].id),
+                        "> {}".format(_one_line(busy[0].text, 60)),
+                    )
+                return md("没有已经跑完、可以接着聊的任务。",
+                          bullets("`/p` 看在办的", "`/r <R-ID>` 看某一条"))
+
+        if not message:
+            return md(
+                "用法：`/talk <想说的话>`",
+                "会接着 **{}** 那次的上下文往下聊：".format(request.id),
+                "> {}".format(_one_line(request.text, 60)),
+            )
+        allowed = (inbound.sender_id == self.approver
+                   or (request.requester_id and inbound.sender_id == request.requester_id))
+        if self.approver and not allowed:
+            return "只有 **{}** 或提出这条需求的人能接着聊。".format(self.approver_nick)
+        if not request.can_continue:
+            return "**{}** 现在是 {}，{}".format(
+                request.id, request.status,
+                "还在跑，等它结束再说。" if request.status == intake_mod.RUNNING
+                else "没有可以恢复的会话。")
+
+        request.follow_up(message)
+        self.store.save(request)
+        self.enqueue(request)
+        return md(
+            "💬 接着 **{}** 聊，已排队。".format(request.id),
+            "> {}".format(message),
+            bullets("它带着上次的全部上下文：调研、草稿、为什么那样切",
+                    "结果会发回这里"),
+        )
+
     def _cmd_cancel(self, rest, inbound):
         """Stop a job that is not going anywhere, and free the slot it holds."""
-        request_id, _ = _split_id(rest)
-        request = self.store.get(request_id) if request_id else None
-        if not request:
-            return md("用法：`/cancel <R-ID>`，例如 `/cancel R20260824-01`", "`/p` 看在办的。")
+        request, _, problem = self._target(rest, intake_mod.OPEN, "/cancel")
+        if problem:
+            return problem
         if self.cancel_job is None:
             if request.status not in intake_mod.OPEN:
                 return "**{}** 已经是 {}。".format(request.id, request.status)
@@ -780,6 +899,70 @@ class Brain:
         self.store.save(request)
         self.enqueue(request)
         return "🚀 **{}** 已排入队列：在 `{}` 开发 #{}。".format(request.id, entry.repo, number)
+
+    def _target(self, rest, statuses, verb):
+        """Which request a command without an explicit id means.
+
+        The id exists so several requests can be told apart. When only one thing
+        it could mean is in flight, demanding it asks somebody to prove they read
+        the message they are visibly replying to. When several are, guessing
+        approves the wrong piece of work — silently — so it asks instead.
+
+        Returns `(request, remainder, problem)`.
+        """
+        request_id, remainder = _split_id(rest)
+        if request_id and _REQUEST_ID_RE.match(request_id):
+            request = self.store.get(request_id)
+            if not request:
+                return None, "", md(
+                    "找不到需求 `{}`。".format(request_id),
+                    bullets("需求 ID 形如 `R20260825-02`", "`/p` 看在办的"),
+                )
+            return request, remainder, None
+
+        # Nothing that looks like an id, so the whole line is arguments.
+        candidates = self.store.by_status(*statuses)
+        if not candidates:
+            return None, "", "现在没有可以{}的需求。`/p` 看在办的。".format(verb)
+        if len(candidates) > 1:
+            return None, "", md(
+                "有 {} 条在办，说清楚是哪条：".format(len(candidates)),
+                bullets(*["`{} {}` — {}".format(verb, r.id, _one_line(r.text, 50))
+                          for r in candidates]),
+            )
+        return candidates[0], (rest or "").strip(), None
+
+    def _target(self, rest, statuses, verb):
+        """Which request a command without an explicit id means.
+
+        The id exists so several requests can be told apart. When only one thing
+        it could mean is in flight, demanding it asks somebody to prove they read
+        the message they are visibly replying to. When several are, guessing
+        approves the wrong piece of work — silently — so it asks instead.
+
+        Returns `(request, remainder, problem)`.
+        """
+        request_id, remainder = _split_id(rest)
+        if request_id and _REQUEST_ID_RE.match(request_id):
+            request = self.store.get(request_id)
+            if not request:
+                return None, "", md(
+                    "找不到需求 `{}`。".format(request_id),
+                    bullets("需求 ID 形如 `R20260825-02`", "`/p` 看在办的"),
+                )
+            return request, remainder, None
+
+        # Nothing that looks like an id, so the whole line is arguments.
+        candidates = self.store.by_status(*statuses)
+        if not candidates:
+            return None, "", "现在没有可以{}的需求。`/p` 看在办的。".format(verb)
+        if len(candidates) > 1:
+            return None, "", md(
+                "有 {} 条在办，说清楚是哪条：".format(len(candidates)),
+                bullets(*["`{} {}` — {}".format(verb, r.id, _one_line(r.text, 50))
+                          for r in candidates]),
+            )
+        return candidates[0], (rest or "").strip(), None
 
     def _split_repo(self, text: str):
         """Pull a leading repository name out of the rest of an approval.

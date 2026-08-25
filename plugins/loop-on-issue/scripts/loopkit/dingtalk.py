@@ -138,6 +138,66 @@ def conversations(env: Dict[str, str]) -> List[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
+def _rewrite(path: str, updates: Dict[str, str]) -> str:
+    """Set keys in place, keeping everything else in the file exactly as it was."""
+    import os as _os
+
+    lines = []
+    if _os.path.isfile(path):
+        with open(path) as fh:
+            lines = [
+                line for line in fh.read().splitlines()
+                if not any(line.strip().startswith(key) for key in updates)
+            ]
+    else:
+        directory = _os.path.dirname(path)
+        if directory:
+            _os.makedirs(directory, exist_ok=True)
+    for key, value in updates.items():
+        lines.append('{}="{}"'.format(key, value))
+    fd = _os.open(path, _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)
+    with _os.fdopen(fd, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    # The mode argument only applies when the file is *created*; this file holds a
+    # client secret, so tighten it whatever it was before.
+    _os.chmod(path, 0o600)
+    return path
+
+
+def allow_conversation(path: str, conversation_id: str, private: bool = False) -> str:
+    """Add a conversation to the allow-list, keeping the ones already there.
+
+    Appending by hand to a comma-separated string is how an existing entry gets
+    dropped, and the drop is silent until somebody's group goes quiet.
+
+    `private` records that this one is a one-to-one chat. It cannot be inferred —
+    the ids look alike — and a card sent to the group endpoint with a private id
+    is accepted and never delivered.
+    """
+    env = load_env([path], environ={})
+    listed = conversations(env)
+    if conversation_id not in listed:
+        listed.append(conversation_id)
+    updates = {"LOOP_DINGTALK_CONVERSATIONS": ",".join(listed)}
+    dms = _dm_conversations(env)
+    if private and conversation_id not in dms:
+        dms.append(conversation_id)
+        updates["LOOP_DINGTALK_DM_CONVERSATIONS"] = ",".join(dms)
+    elif dms:
+        updates["LOOP_DINGTALK_DM_CONVERSATIONS"] = ",".join(dms)
+    return _rewrite(path, updates)
+
+
+def deny_conversation(path: str, conversation_id: str) -> str:
+    env = load_env([path], environ={})
+    return _rewrite(path, {
+        "LOOP_DINGTALK_CONVERSATIONS": ",".join(
+            c for c in conversations(env) if c != conversation_id),
+        "LOOP_DINGTALK_DM_CONVERSATIONS": ",".join(
+            c for c in _dm_conversations(env) if c != conversation_id),
+    })
+
+
 def set_enabled(path: str, on: bool) -> str:
     """Flip the switch in place, creating the file if it does not exist yet."""
     import os as _os
@@ -156,6 +216,16 @@ def set_enabled(path: str, on: bool) -> str:
     with _os.fdopen(fd, "w") as fh:
         fh.write("\n".join(lines) + "\n")
     return path
+
+
+def _dm_conversations(env: Dict[str, str]) -> List[str]:
+    """Allow-listed conversations that are private chats rather than groups.
+
+    Their ids look alike, so this cannot be inferred — it is stated. Empty means
+    "the DM target is not tied to a conversation", which is the single-user setup.
+    """
+    raw = (env.get("LOOP_DINGTALK_DM_CONVERSATIONS") or "").strip()
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def sign_webhook(url: str, secret: str, timestamp_ms: Optional[int] = None) -> str:
@@ -267,13 +337,23 @@ class DingTalk:
         half of a dual write vanish unnoticed.
         """
         if self.configured:
-            # A private chat first, when one is configured: a card sent to a group
-            # endpoint with a one-to-one conversation id is silently accepted and
-            # never delivered.
+            allowed = conversations(self.env)
             users = dm_users(self.env)
-            if users and not conversation_id:
+
+            # A named conversation is where the work came from, and outranks any
+            # default — a question about something raised in a group belongs in
+            # that group, not in one person's private chat. It must still be
+            # allow-listed: otherwise a reply could be steered somewhere the bot
+            # was never given, by anyone who can get a value into the record it
+            # reads from.
+            target = conversation_id if conversation_id in allowed else None
+
+            # A one-to-one conversation is allow-listed like any other, but its
+            # cards cannot go to the group endpoint — accepted there, and never
+            # delivered.
+            if users and (target is None or target in _dm_conversations(self.env)):
                 return self.send_dm(users[0], title, text) or ""
-            target = conversation_id or (conversations(self.env)[:1] or [None])[0]
+            target = target or (allowed[:1] or [None])[0]
             if target:
                 return self.send_group(target, title, text) or ""
         if self.env.get("LOOP_DINGTALK_WEBHOOK"):

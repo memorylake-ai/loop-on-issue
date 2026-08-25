@@ -187,6 +187,12 @@ class Executor:
     def submit(self, request):
         self.queue.put(request.id)
 
+    def _notify(self, text, conversation=None):
+        try:
+            self.notify(text, conversation)
+        except TypeError:
+            self.notify(text)
+
     def cancel(self, request_id, by=""):
         """Stop a job and free the worker holding it."""
         request = self.store.get(request_id)
@@ -231,7 +237,7 @@ class Executor:
         if not entry or not os.path.isdir(entry.path):
             request.fail("no local checkout registered for {}".format(request.repo))
             self.store.save(request)
-            self.notify(self._failure_text(request))
+            self.notify(self._failure_text(request), request.conversation)
             return
 
         # Derive the session before starting, so `claude --resume <id>` can get
@@ -244,7 +250,12 @@ class Executor:
         log.info("running %s (%s) in %s session=%s",
                  request.id, request.kind, entry.path, session)
 
-        prompt = (self._retry_prompt(request) if resuming else self._prompt(request, entry))
+        followup = request.take_followup()
+        if followup:
+            self.store.save(request)
+        prompt = (self._followup_prompt(request, followup) if followup
+                  else self._retry_prompt(request) if resuming
+                  else self._prompt(request, entry))
         log_path = self.store.log_for(request.id)
         repo_conf = cfg.load(entry.path)
 
@@ -277,7 +288,7 @@ class Executor:
                 request.fail(str(exc))
                 self.store.save(request)
                 self._release_issue(request, entry)
-                self.notify(self._failure_text(request))
+                self.notify(self._failure_text(request), request.conversation)
                 return
             request.pid = proc.pid
             self.store.save(request)
@@ -289,7 +300,7 @@ class Executor:
                 request.fail("timed out after {}s and was stopped".format(self.timeout))
                 self.store.save(request)
                 self._release_issue(request, entry)
-                self.notify(self._failure_text(request))
+                self.notify(self._failure_text(request), request.conversation)
                 return
             finally:
                 self._processes.pop(request.id, None)
@@ -329,12 +340,12 @@ class Executor:
             request.fail(reason)
             self.store.save(request)
             self._release_issue(request, entry)
-            self.notify(self._failure_text(request))
+            self.notify(self._failure_text(request), request.conversation)
             return
 
         request.finish(issues=issues)
         self.store.save(request)
-        self.notify(self._success_text(request, result))
+        self.notify(self._success_text(request, result), request.conversation)
 
     def _release_issue(self, request, entry):
         """Hand a failed development job's issue back to a human.
@@ -381,6 +392,23 @@ class Executor:
             return []
         started = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(request.started_at - 60))
         return [i.url for i in issues if (i.created_at or "") >= started]
+
+    def _followup_prompt(self, request, message):
+        """Continue the conversation, not restate the brief.
+
+        The session already holds the requirement, whatever it read and whatever
+        it built. Repeating any of that invites it to start again and reach a
+        different answer than the one being asked about.
+        """
+        return (
+            "The person who asked for this has something to add:\n\n{message}\n\n"
+            "Act on it in the same repository, using what you already know. If it "
+            "means changing issues you filed, change them — edit or close what is "
+            "wrong rather than filing more alongside it.\n\n"
+            "Then write what you did to `{result}`, replacing what is there. That "
+            "file is what gets sent back, so it should read as an answer to what "
+            "they just said, not a summary of everything so far."
+        ).format(message=message.strip(), result=self.store.result_for(request.id))
 
     def _retry_prompt(self, request):
         """Continue an attempt that did not finish, rather than starting over.
@@ -455,6 +483,7 @@ class Executor:
             parts.append(listener_mod.bullets(*request.issues))
         if result.strip():
             parts.append(result.strip()[:1500])
+        parts.append("想改点什么就接着说：`/talk <想说的话>`")
         return listener_mod.md(*parts)
 
     def _failure_text(self, request):
@@ -547,6 +576,7 @@ def inbound_from(data: dict) -> listener_mod.Inbound:
         # The key that makes a quote-reply route exactly.
         pqk=data.get("originalProcessQueryKey") or None,
         session_webhook=data.get("sessionWebhook") or "",
+        conversation_type=str(data.get("conversationType") or ""),
     )
 
 
@@ -584,6 +614,10 @@ def make_brain(env, repo_root, enqueue=None):
         queue_label=conf.queue_label,
         assignee=conf.assignee,
         enqueue=enqueue,
+        allow_conversation=lambda cid, private: dt_mod.allow_conversation(
+            dt_mod.default_env_paths()[0], cid, private),
+        deny_conversation=lambda cid: dt_mod.deny_conversation(
+            dt_mod.default_env_paths()[0], cid),
     )
     return brain, registry, store, conf
 
@@ -598,14 +632,15 @@ def run(env, repo_root):
 
     client_out = dt_mod.DingTalk(env)
 
-    def announce(text):
-        """Say something into the configured conversation, unprompted.
+    def announce(text, conversation=None):
+        """Say something unprompted, where the work came from.
 
-        Used when a job finishes: whoever asked has long since stopped watching
-        the thread their request came from.
+        Used when a job finishes: whoever asked stopped watching long ago, and a
+        result delivered to a different conversation than the request reaches
+        nobody who was waiting for it.
         """
         try:
-            client_out.send("loop", text)
+            client_out.send("loop", text, conversation_id=conversation)
         except Exception as exc:  # noqa: BLE001
             log.warning("could not announce: %s", exc)
 
@@ -641,6 +676,10 @@ def run(env, repo_root):
                      (inbound.pqk or "")[:12], inbound.text[:120])
             # At-least-once delivery: a reconnect redelivers the same id, and
             # acting twice on an approval would start the same job twice.
+            # Re-read the allow-list per message: it is a small file, and a
+            # conversation added with /allow has to work in the next breath rather
+            # than after somebody restarts the listener.
+            brain.conversations = dt_mod.conversations(dt_mod.load_env())
             if inbound.msg_id and dedupe.seen(inbound.msg_id):
                 log.info("duplicate delivery %s ignored", inbound.msg_id)
                 return AckMessage.STATUS_OK, "duplicate"

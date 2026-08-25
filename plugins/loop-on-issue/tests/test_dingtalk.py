@@ -292,3 +292,126 @@ class Switch(unittest.TestCase):
     def test_the_file_is_created_owner_only(self):
         dingtalk.set_enabled(self.path, True)
         self.assertEqual(oct(os.stat(self.path).st_mode & 0o777), "0o600")
+
+
+class OutboundTargeting(unittest.TestCase):
+    """A card belongs in the conversation the work came from.
+
+    With a fixed target, a requirement raised in a group produced questions that
+    went to one person's private chat — the group that asked never saw them, and
+    could not answer.
+    """
+
+    def _client(self, env):
+        self.calls = []
+
+        def http(url, payload, headers, method="POST"):
+            self.calls.append({"url": url, "payload": payload})
+            return ({"accessToken": "T", "expireIn": 999} if "accessToken" in url
+                    else {"processQueryKey": "K"})
+
+        return dingtalk.DingTalk(env, http=http)
+
+    BASE = {"DINGTALK_CLIENT_ID": "c", "DINGTALK_CLIENT_SECRET": "s",
+            "LOOP_DINGTALK_CONVERSATIONS": "cid-group,cid-other"}
+
+    def test_a_named_conversation_wins_over_every_default(self):
+        client = self._client(dict(self.BASE, LOOP_DINGTALK_DM_USERS="staff-1"))
+        client.send("t", "b", conversation_id="cid-group")
+        send = [c for c in self.calls if "Messages" in c["url"]][0]
+        self.assertIn("groupMessages", send["url"])
+        self.assertEqual(send["payload"]["openConversationId"], "cid-group")
+
+    def test_a_named_conversation_must_be_allow_listed(self):
+        # Otherwise a reply could be steered into a conversation the bot was never
+        # given, by anyone who could get a value into the record it reads.
+        client = self._client(self.BASE)
+        client.send("t", "b", conversation_id="cid-elsewhere")
+        send = [c for c in self.calls if "Messages" in c["url"]][0]
+        self.assertNotEqual(send["payload"].get("openConversationId"), "cid-elsewhere")
+
+    def test_without_a_named_conversation_the_configured_default_applies(self):
+        client = self._client(dict(self.BASE, LOOP_DINGTALK_DM_USERS="staff-1"))
+        client.send("t", "b")
+        self.assertTrue(any("oToMessages" in c["url"] for c in self.calls))
+
+    def test_a_private_chat_id_still_routes_one_to_one(self):
+        # A private conversation is allow-listed like any other, but its cards
+        # cannot go to the group endpoint — accepted there, never delivered.
+        client = self._client(dict(self.BASE,
+                                   LOOP_DINGTALK_CONVERSATIONS="cid-dm,cid-group",
+                                   LOOP_DINGTALK_DM_CONVERSATIONS="cid-dm",
+                                   LOOP_DINGTALK_DM_USERS="staff-1"))
+        client.send("t", "b", conversation_id="cid-dm")
+        self.assertTrue(any("oToMessages" in c["url"] for c in self.calls))
+
+    def test_a_group_in_the_same_deployment_still_gets_a_group_card(self):
+        # The two ids are indistinguishable, so which is which is stated rather
+        # than guessed — guessing is what produced cards accepted by the group
+        # endpoint and never delivered.
+        client = self._client(dict(self.BASE,
+                                   LOOP_DINGTALK_CONVERSATIONS="cid-dm,cid-group",
+                                   LOOP_DINGTALK_DM_CONVERSATIONS="cid-dm",
+                                   LOOP_DINGTALK_DM_USERS="staff-1"))
+        client.send("t", "b", conversation_id="cid-group")
+        send = [c for c in self.calls if "Messages" in c["url"]][0]
+        self.assertIn("groupMessages", send["url"])
+
+
+class EditingTheAllowList(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="loop-allow-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "dingtalk.env")
+        with open(self.path, "w") as fh:
+            fh.write('DINGTALK_CLIENT_ID="keep"\nLOOP_DINGTALK_CONVERSATIONS="cid-a"\n')
+
+    def _env(self):
+        return dingtalk.load_env([self.path], environ={})
+
+    def test_adding_appends_rather_than_replaces(self):
+        # Hand-editing a comma-separated string is how the existing entry gets
+        # dropped, and the drop is silent until somebody's group goes quiet.
+        dingtalk.allow_conversation(self.path, "cid-b")
+        self.assertEqual(dingtalk.conversations(self._env()), ["cid-a", "cid-b"])
+
+    def test_adding_twice_does_not_duplicate(self):
+        dingtalk.allow_conversation(self.path, "cid-b")
+        dingtalk.allow_conversation(self.path, "cid-b")
+        self.assertEqual(dingtalk.conversations(self._env()), ["cid-a", "cid-b"])
+
+    def test_everything_else_in_the_file_survives(self):
+        dingtalk.allow_conversation(self.path, "cid-b")
+        self.assertEqual(self._env()["DINGTALK_CLIENT_ID"], "keep")
+
+    def test_a_private_chat_is_marked_as_one(self):
+        dingtalk.allow_conversation(self.path, "cid-dm", private=True)
+        env = self._env()
+        self.assertIn("cid-dm", dingtalk.conversations(env))
+        self.assertIn("cid-dm", dingtalk._dm_conversations(env))
+
+    def test_a_group_is_not_marked_private(self):
+        dingtalk.allow_conversation(self.path, "cid-b")
+        self.assertNotIn("cid-b", dingtalk._dm_conversations(self._env()))
+
+    def test_removing(self):
+        dingtalk.allow_conversation(self.path, "cid-b")
+        dingtalk.deny_conversation(self.path, "cid-a")
+        self.assertEqual(dingtalk.conversations(self._env()), ["cid-b"])
+
+    def test_removing_also_clears_the_private_marking(self):
+        dingtalk.allow_conversation(self.path, "cid-dm", private=True)
+        dingtalk.deny_conversation(self.path, "cid-dm")
+        self.assertNotIn("cid-dm", dingtalk._dm_conversations(self._env()))
+
+    def test_removing_something_absent_is_not_an_error(self):
+        dingtalk.deny_conversation(self.path, "never-there")
+
+    def test_the_file_stays_owner_only(self):
+        dingtalk.allow_conversation(self.path, "cid-b")
+        self.assertEqual(oct(os.stat(self.path).st_mode & 0o777), "0o600")
+
+    def test_a_file_that_does_not_exist_yet_is_created(self):
+        fresh = os.path.join(self.dir, "new.env")
+        dingtalk.allow_conversation(fresh, "cid-x")
+        self.assertEqual(dingtalk.conversations(dingtalk.load_env([fresh], environ={})), ["cid-x"])

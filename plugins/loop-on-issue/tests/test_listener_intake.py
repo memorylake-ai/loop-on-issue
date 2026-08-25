@@ -528,3 +528,219 @@ class DeferredWorkIsVisible(Base):
         self.brain.cancel_job = lambda rid, by: (True, "已停掉 " + rid)
         self.assertIn("已停掉", self.brain.handle(
             msg(text="/cancel " + request.id, msg_id="m2", sender=self.APPROVER)))
+
+
+class WorkAnswersWhereItCame(Base):
+    """A requirement raised in a group keeps its conversation.
+
+    Replies ride the inbound session webhook and always land correctly. Cards the
+    bot *initiates* — a question mid-job, a finished report — used a fixed target,
+    so work raised in a group produced questions in one person's private chat that
+    the group never saw and could not answer.
+    """
+
+    def test_the_conversation_is_recorded_with_the_requirement(self):
+        self.brain.handle(msg(text="做个东西", conversation="cid-1", sender="somebody"))
+        self.assertEqual(self.store.all()[0].conversation, "cid-1")
+
+    def test_it_survives_approval_and_queueing(self):
+        self.brain.handle(msg(text="做个东西", conversation="cid-1", sender="somebody"))
+        request = self.store.all()[0]
+        self.brain.handle(msg(text="同意 " + request.id, msg_id="m2", sender=self.APPROVER))
+        self.assertEqual(self.enqueued[0].conversation, "cid-1")
+
+    def test_a_development_job_records_where_it_was_asked_for(self):
+        self.forge.add(612)
+        self.brain.handle(msg(text="/dev 612", conversation="cid-1", sender=self.APPROVER))
+        self.assertEqual(self.enqueued[0].conversation, "cid-1")
+
+
+class SelfServiceAllowList(Base):
+    """Adding a group should not mean editing a file and restarting."""
+
+    def setUp(self):
+        Base.setUp(self)
+        self.allowed = []
+        self.denied = []
+        self.brain.allow_conversation = lambda cid, private: self.allowed.append((cid, private))
+        self.brain.deny_conversation = self.denied.append
+
+    def _say(self, text, sender=None, conversation="cid-new", ctype="2"):
+        return self.brain.handle(listener.Inbound(
+            msg_id=text + conversation, text=text, sender_id=sender or self.APPROVER,
+            sender_nick="穆轩", conversation_id=conversation, conversation_type=ctype))
+
+    def test_the_approver_can_allow_the_conversation_they_are_in(self):
+        # It has to work from somewhere not yet listed — that is the entire point
+        # — so it is exempt from the allow-list and gated on the approver instead.
+        reply = self._say("/allow")
+        self.assertEqual(self.allowed, [("cid-new", False)])
+        self.assertIn("白名单", reply)
+
+    def test_nobody_else_can(self):
+        self._say("/allow", sender="somebody")
+        self.assertEqual(self.allowed, [])
+
+    def test_a_private_chat_is_recorded_as_one(self):
+        # The ids do not say which is which, and a card sent to the group endpoint
+        # with a private id is accepted and never delivered.
+        self._say("/allow", ctype="1")
+        self.assertEqual(self.allowed, [("cid-new", True)])
+
+    def test_it_takes_effect_immediately(self):
+        self._say("/allow")
+        self.assertIn("cid-new", self.brain.conversations)
+        # A command that was ignored a moment ago now answers.
+        self.assertTrue(self._say("/ping"))
+
+    def test_deny_removes_it(self):
+        self._say("/allow")
+        self._say("/deny")
+        self.assertEqual(self.denied, ["cid-new"])
+        self.assertNotIn("cid-new", self.brain.conversations)
+
+    def test_an_unlisted_conversation_still_ignores_everything_else(self):
+        self.assertEqual(self._say("/ls"), "")
+        self.assertEqual(self._say("做个东西", sender="somebody"), "")
+
+    def test_a_machine_with_no_writable_config_says_so(self):
+        self.brain.allow_conversation = None
+        self.assertIn("加不了", self._say("/allow"))
+
+
+class ApprovingWithoutRetypingTheId(Base):
+    """Quote the card, say 同意. Retyping R20260825-02 is the machine's job.
+
+    The id exists so several requests can be told apart. When there is only one
+    thing it could mean, demanding it is asking somebody to prove they read a
+    message they are visibly replying to.
+    """
+
+    def _pending(self, text="做个东西", mid="a"):
+        self.brain.handle(msg(text=text, msg_id=mid, sender="somebody"))
+        return self.store.by_status(intake_mod.PENDING)[-1]
+
+    def test_a_bare_approval_takes_the_only_pending_one(self):
+        request = self._pending()
+        reply = self.brain.handle(msg(text="同意", msg_id="m2", sender=self.APPROVER))
+        self.assertEqual(self.store.get(request.id).status, intake_mod.APPROVED)
+        self.assertIn(request.id, reply)
+
+    def test_a_bare_approval_still_takes_a_repository_and_a_note(self):
+        request = self._pending()
+        self.brain.handle(msg(text="同意 bloom 注意别动定价页", msg_id="m2", sender=self.APPROVER))
+        found = self.store.get(request.id)
+        self.assertEqual(found.repo, "org/bloom")
+        self.assertIn("定价页", found.approval_note)
+
+    def test_with_several_pending_it_asks_which(self):
+        # Guessing here approves the wrong piece of work, silently.
+        first = self._pending("第一件", mid="a")
+        second = self._pending("第二件", mid="b")
+        reply = self.brain.handle(msg(text="同意", msg_id="m2", sender=self.APPROVER))
+        self.assertIn(first.id, reply)
+        self.assertIn(second.id, reply)
+        self.assertEqual(self.store.get(first.id).status, intake_mod.PENDING)
+        self.assertEqual(self.store.get(second.id).status, intake_mod.PENDING)
+
+    def test_with_nothing_pending_it_says_so(self):
+        self.assertIn("没有", self.brain.handle(msg(text="同意", sender=self.APPROVER)))
+
+    def test_an_explicit_id_still_wins(self):
+        first = self._pending("第一件", mid="a")
+        self._pending("第二件", mid="b")
+        self.brain.handle(msg(text="同意 " + first.id, msg_id="m2", sender=self.APPROVER))
+        self.assertEqual(self.store.get(first.id).status, intake_mod.APPROVED)
+
+    def test_a_bare_rejection_needs_its_reason(self):
+        # The person who asked only ever sees this sentence.
+        request = self._pending()
+        reply = self.brain.handle(msg(text="拒绝", msg_id="m2", sender=self.APPROVER))
+        self.assertIn(request.id, reply)
+        self.assertIn("理由", reply)
+        self.assertEqual(self.store.get(request.id).status, intake_mod.PENDING)
+
+    def test_a_bare_rejection_with_a_reason_works(self):
+        request = self._pending()
+        self.brain.handle(msg(text="拒绝 这个已经做过了", msg_id="m2", sender=self.APPROVER))
+        self.assertEqual(self.store.get(request.id).status, intake_mod.REJECTED)
+
+    def test_cancel_takes_the_only_job_in_flight(self):
+        request = self._pending()
+        self.brain.handle(msg(text="同意 " + request.id, msg_id="ok", sender=self.APPROVER))
+        self.brain.cancel_job = lambda rid, by: (True, "已停掉 " + rid)
+        self.assertIn(request.id, self.brain.handle(
+            msg(text="/cancel", msg_id="m3", sender=self.APPROVER)))
+
+    def test_repo_takes_the_only_one_too(self):
+        request = self._pending()
+        self.brain.handle(msg(text="/repo bloom", msg_id="m2", sender=self.APPROVER))
+        self.assertEqual(self.store.get(request.id).repo, "org/bloom")
+
+
+class ContinuingTheConversation(Base):
+    """The session that did the work is the expensive thing; keep talking to it."""
+
+    def _finished(self, requester="somebody", requester_id="staff-9"):
+        self.brain.handle(listener.Inbound(
+            msg_id="a", text="做个东西", sender_id=requester_id, sender_nick=requester,
+            conversation_id="cid-1"))
+        request = self.store.all()[-1]
+        self.brain.handle(msg(text="同意 " + request.id, msg_id="ok", sender=self.APPROVER))
+        request = self.store.get(request.id)
+        request.start(session="derived")
+        request.finish(issues=["https://f/1"])
+        return self.store.save(request)
+
+    def test_it_resumes_the_session_that_did_the_work(self):
+        request = self._finished()
+        reply = self.brain.handle(msg(text="/talk 把第二条再拆细一点", msg_id="m2",
+                                      sender=self.APPROVER))
+        found = self.store.get(request.id)
+        self.assertEqual(found.followup, "把第二条再拆细一点")
+        self.assertEqual(found.session, "derived")
+        self.assertEqual(self.enqueued[-1].id, request.id)
+        self.assertIn(request.id, reply)
+
+    def test_the_person_who_raised_it_may_continue_too(self):
+        # It is their requirement, and the session is already scoped to it.
+        request = self._finished()
+        self.brain.handle(listener.Inbound(
+            msg_id="m3", text="/talk 再拆细", sender_id="staff-9", sender_nick="somebody",
+            conversation_id="cid-1"))
+        self.assertEqual(self.store.get(request.id).followup, "再拆细")
+
+    def test_a_stranger_may_not(self):
+        request = self._finished()
+        reply = self.brain.handle(listener.Inbound(
+            msg_id="m3", text="/talk 再拆细", sender_id="nobody", sender_nick="路人",
+            conversation_id="cid-1"))
+        self.assertIn("只有", reply)
+        self.assertEqual(self.store.get(request.id).followup, "")
+
+    def test_it_takes_the_most_recent_when_none_is_named(self):
+        # Unlike approving, resuming to ask something destroys nothing — so this
+        # guesses where approval refuses to, and says which it took.
+        self._finished()
+        second = self._finished()
+        second.finished_at += 100
+        self.store.save(second)
+        reply = self.brain.handle(msg(text="/talk 再拆细", msg_id="m4", sender=self.APPROVER))
+        self.assertIn(second.id, reply)
+
+    def test_a_running_job_is_refused(self):
+        # A second prompt into the same session races the thought in progress.
+        request = self._finished()
+        request.status = intake_mod.RUNNING
+        self.store.save(request)
+        self.assertIn("还在跑", self.brain.handle(
+            msg(text="/talk 再拆细", msg_id="m5", sender=self.APPROVER)))
+
+    def test_a_message_is_required(self):
+        self._finished()
+        self.assertIn("用法", self.brain.handle(
+            msg(text="/talk", msg_id="m6", sender=self.APPROVER)))
+
+    def test_with_nothing_finished_it_says_so(self):
+        self.assertIn("没有已经跑完", self.brain.handle(
+            msg(text="/talk 再拆细", sender=self.APPROVER)))

@@ -64,11 +64,15 @@ def read_text(inline, path):
     return inline or ""
 
 
-def notifier(dry_run: bool = False):
+def notifier(dry_run: bool = False, conversation: str = None):
     """A `(title, text) -> pqk|None` callable, or None when nothing is configured.
 
     Returning None rather than raising is deliberate: DingTalk is an accelerant,
     not the channel. The issue comment is what has to work.
+
+    `conversation` is where the work came from. A question about something raised
+    in a group belongs in that group — sending it to a fixed target means the
+    people who asked never see it and cannot answer.
     """
     env = dt_mod.load_env()
     client = dt_mod.DingTalk(env)
@@ -76,7 +80,7 @@ def notifier(dry_run: bool = False):
         return None
     if dry_run:
         return lambda title, text: None
-    return client.send
+    return lambda title, text: client.send(title, text, conversation_id=conversation)
 
 
 def pending_index():
@@ -605,9 +609,12 @@ def cmd_hook(args):
         else:
             # A decomposition job: no issue exists yet, so the question goes on
             # the request it is working from.
+            store = intake_mod.Store(os.environ.get("LOOP_INTAKE_DIR") or None)
+            request = store.get(intake_id)
             result = ask_mod.ask_intake(
-                intake_mod.Store(os.environ.get("LOOP_INTAKE_DIR") or None), intake_id, text,
-                options=options, wait=wait, notify=notifier(), index=pending_index(),
+                store, intake_id, text, options=options, wait=wait,
+                notify=notifier(conversation=request.conversation if request else None),
+                index=pending_index(),
             )
     except Exception as exc:  # noqa: BLE001
         print(_HOOK_BROKEN.format(error=exc), file=sys.stderr)
@@ -816,6 +823,18 @@ def cmd_intake(args):
 def cmd_dingtalk(args):
     env = dt_mod.load_env()
     client = dt_mod.DingTalk(env)
+    if args.action in ("allow", "deny"):
+        if not args.target:
+            raise CommandError("usage: loop dingtalk {} <conversation-id> [--dm]".format(args.action))
+        path = dt_mod.default_env_paths()[0]
+        if args.action == "allow":
+            dt_mod.allow_conversation(path, args.target, private=args.dm)
+        else:
+            dt_mod.deny_conversation(path, args.target)
+        env = dt_mod.load_env()
+        out({"conversations": dt_mod.conversations(env),
+             "private": dt_mod._dm_conversations(env), "file": path})
+        return 0
     if args.action in ("enable", "disable"):
         path = dt_mod.default_env_paths()[0]
         dt_mod.set_enabled(path, args.action == "enable")
@@ -1148,7 +1167,11 @@ def build_parser():
 
     sp = sub.add_parser("dingtalk", help="chat channel status and housekeeping")
     sp.add_argument("action", nargs="?", default="status",
-                    choices=("status", "sweep", "serve", "enable", "disable"))
+                    choices=("status", "sweep", "serve", "enable", "disable", "allow", "deny"))
+    sp.add_argument("target", nargs="?", help="conversation id, for allow/deny")
+    sp.add_argument("--dm", action="store_true",
+                    help="the conversation is a private chat, not a group — it cannot be "
+                         "inferred, and a card sent to the wrong endpoint never arrives")
     sp.add_argument("extra", nargs="*", help="passed through to the listener (serve)")
     sp.set_defaults(func=cmd_dingtalk)
 
